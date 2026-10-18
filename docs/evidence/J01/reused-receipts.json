@@ -1,0 +1,27 @@
+{
+  "p5Receipt": "/Users/nofun/Documents/Codex/2026-10-17/L10-planning-resume/LIVE-ACCEPTANCE-r2.json",
+  "receiptSHA256": "b8e866de8e9a50b536d81181aa3b37cd436d6c6fb45836a161dffb24bd8a2d0e",
+  "sourceScope": "Isolated candidate canonical mission via actual production MissionService/PlanningStore/FactsPort; installed T3 was not restarted or written. Installed state contained no missions/planning table.",
+  "status": "REAL_CHATGPT_UI_AND_PRODUCTION_STORE_R2_RECONCILED_WITH_LIMITS",
+  "missionId": "d181-L10-proof-20261017-c67d",
+  "planningId": "d181-L10-proof-plan-20261017-c67d-r2",
+  "proofs": [
+    {
+      "kind": "fullAnswer",
+      "sha256": "6db0502d3066eaa04a3a8429140d79e5d68129ddd9378a06afc5ac6aadd379a6",
+      "bytes": 2508,
+      "matchesReceipt": true
+    },
+    {
+      "kind": "actualRequiredAttachment",
+      "sha256": "57615788cd1a2703bf641065a692bc77d54a34f0b7199344e9143f9e5b600147",
+      "bytes": 2598,
+      "matchesReceipt": true
+    }
+  ],
+  "p4Receipt": {
+    "path": "/Users/nofun/Documents/Codex/2026-10-17/P4-frozen-43cf/P4-HANDSHAKE-PUBLIC-RECEIPT.json",
+    "sha256": "8fd817f4d28c13c891e6d0c9a364406e639e926a2953dd67e72276aaa731683c",
+    "scope": "Historical authenticated handshake/replay refusal only; fencing unsupported, durable ACK volatile. Not J01 canonical admission."
+  }
+}

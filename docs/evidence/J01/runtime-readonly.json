@@ -1,0 +1,62 @@
+{
+  "observedAt": "2026-10-18T00:58:15.411635+00:00",
+  "status": "BLOCKED_INSTALLED_MISSION_AUTHORITY",
+  "app": "/Applications/No Fun T3.app",
+  "version": "0.0.46-preview.20261017.f044155c53d",
+  "sourceBranch": "job/F04",
+  "sourceTip": "4155c53d141d8cd775a72ed6e1765bc7c5b593c5",
+  "appAsarSHA256": "4ffcf4c7d9d59d0f7341993b8fc632ce21a2523371be4b09fa51c47e8325dd2a",
+  "CodeResourcesSHA256": "ec512c4cb85a78347596db1e0d14623edee26cdacb4cccbfdd4410956e584c78",
+  "CDHash": "ae092f302dbb1bdfba8c5984b9f47fcceffa3782",
+  "matchesF04": true,
+  "runtime": {
+    "pid": 1802,
+    "startedAt": "2026-10-18T00:52:19.333Z"
+  },
+  "pidIdentity": "1802  1765 Sat Oct 17 18:52:15 2026     /Applications/No Fun T3.app/Contents/MacOS/No Fun T3",
+  "databaseMode": "ro; PRAGMA query_only=ON",
+  "migrations": [
+    [
+      59,
+      "Missions"
+    ],
+    [
+      60,
+      "BridgeInbox"
+    ],
+    [
+      61,
+      "BridgeInboxQuarantine"
+    ],
+    [
+      62,
+      "BridgeInboxQuarantineEventId"
+    ],
+    [
+      63,
+      "MissionPlanning"
+    ],
+    [
+      64,
+      "MissionPeerHandshake"
+    ]
+  ],
+  "counts": {
+    "projection_missions": 0,
+    "projection_mission_planning": 0,
+    "projection_mission_planning_receipts": 0,
+    "mission_peer_handshake_nonces": 0
+  },
+  "admissionDraining": 0,
+  "J01CreateCommandReceiptCount": 0,
+  "J01CreateCommandEventCount": 0,
+  "currentCanonicalRole": "none: no canonical missions exist",
+  "policySHA256": "903251aa7b1c3eb16f022433b222ff82accf202ac0bfcc41bdbcebbfb859d445",
+  "J01ProjectAllowed": false,
+  "J01BootstrapAllowed": false,
+  "installedThisJob": false,
+  "restartedThisJob": false,
+  "reconfiguredThisJob": false,
+  "appBuildsThisJob": 0,
+  "childrenStartedThisJob": 0
+}

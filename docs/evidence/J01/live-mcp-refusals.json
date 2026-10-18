@@ -1,0 +1,19 @@
+{
+  "observedAt": "2026-10-18T00:57:26.818Z",
+  "createResponse": {
+    "_tag": "MissionMcpFailure",
+    "code": "scope_denied",
+    "message": "The mission authority resolver denied the request."
+  },
+  "getResponse": {
+    "_tag": "MissionMcpFailure",
+    "code": "scope_denied",
+    "message": "The mission authority resolver denied the request."
+  },
+  "deliveryRoleResponse": {
+    "_tag": "MissionLifecycleMcpFailure",
+    "code": "scope_denied"
+  },
+  "missionId": "J01-installed-single-host-20261017",
+  "commandId": "J01-installed-single-host-create-v1"
+}
