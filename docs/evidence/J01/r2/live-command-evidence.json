@@ -1,0 +1,434 @@
+{
+  "createdAt": "2026-10-18T21:41:48.330Z",
+  "createRequest": {
+    "type": "mission.create",
+    "commandId": "J01-installed-single-host-create-v1",
+    "mission": {
+      "schemaVersion": 1,
+      "id": "J01-installed-single-host-20261017",
+      "revision": 0,
+      "teamId": "nofun",
+      "authorityEnvironmentId": "87edc8b7-26a6-4ce2-8159-d0c483a11246",
+      "projectTimezone": "America/Denver",
+      "bindings": [
+        {
+          "projectId": "0a02a180-288c-4e5f-8100-8d5c445f5988",
+          "workspaceRoot": "/Users/nofun/Documents/Codex/2026-10-15/nofun-canvas-checkpoint",
+          "baseCommit": "4155c53d141d8cd775a72ed6e1765bc7c5b593c5",
+          "ancestry": [
+            "4155c53d141d8cd775a72ed6e1765bc7c5b593c5"
+          ]
+        }
+      ],
+      "intent": {
+        "outcome": "Produce an independently checked F04 installed-runtime evidence inventory and J02 handoff through one canonical mission.",
+        "scope": [
+          "Read installed F04 identity and existing P4/P5 receipts; one admitted evidence-inventory child and root integration."
+        ],
+        "exclusions": [
+          "T3 install, quit, restart, reconfiguration",
+          "nofunos main push",
+          "P5 repeat submission"
+        ],
+        "authorityRefs": [
+          {
+            "source": "user",
+            "ref": "J01 job assignment 2026-10-17"
+          }
+        ],
+        "acceptanceCriteria": [
+          {
+            "id": "delivery",
+            "text": "Admitted real child, durable receipt, root integration; same identity after lost ACK/resume; actual current role; old build refused."
+          }
+        ],
+        "decisions": []
+      },
+      "integrationTarget": {
+        "branch": "job/J01",
+        "summary": "Branch-only evidence inventory and J02 handoff"
+      },
+      "managers": {
+        "delivery": {
+          "threadId": "mcp:23961559-6c8b-4122-aa45-635a723d1e7a",
+          "epoch": 0
+        }
+      },
+      "status": "active",
+      "tasks": [
+        {
+          "id": "J01-F04-evidence-inventory",
+          "projectId": "0a02a180-288c-4e5f-8100-8d5c445f5988",
+          "title": "Inventory installed F04 and c67d receipts for the J02 handoff",
+          "specHash": "J01-F04-evidence-inventory-v1",
+          "dependencyHashes": [],
+          "dependencies": [],
+          "acceptanceIds": [
+            "delivery"
+          ],
+          "updatedAt": "2026-10-18T00:56:46.981Z"
+        }
+      ],
+      "updatedAt": "2026-10-18T00:56:46.981Z"
+    }
+  },
+  "create": {
+    "missionId": "J01-installed-single-host-20261017",
+    "commandId": "J01-installed-single-host-create-v1",
+    "committed": true,
+    "resultSequence": 1788408,
+    "status": "accepted"
+  },
+  "createReplay": {
+    "missionId": "J01-installed-single-host-20261017",
+    "commandId": "J01-installed-single-host-create-v1",
+    "committed": false,
+    "resultSequence": 1788408,
+    "status": "accepted"
+  },
+  "deliveryRole": {
+    "schemaVersion": 1,
+    "id": "J01-installed-single-host-20261017",
+    "revision": 0,
+    "teamId": "nofun",
+    "authorityEnvironmentId": "87edc8b7-26a6-4ce2-8159-d0c483a11246",
+    "projectTimezone": "America/Denver",
+    "bindings": [
+      {
+        "projectId": "0a02a180-288c-4e5f-8100-8d5c445f5988",
+        "workspaceRoot": "/Users/nofun/Documents/Codex/2026-10-15/nofun-canvas-checkpoint",
+        "baseCommit": "4155c53d141d8cd775a72ed6e1765bc7c5b593c5",
+        "ancestry": [
+          "4155c53d141d8cd775a72ed6e1765bc7c5b593c5"
+        ]
+      }
+    ],
+    "intent": {
+      "outcome": "Produce an independently checked F04 installed-runtime evidence inventory and J02 handoff through one canonical mission.",
+      "scope": [
+        "Read installed F04 identity and existing P4/P5 receipts; one admitted evidence-inventory child and root integration."
+      ],
+      "exclusions": [
+        "T3 install, quit, restart, reconfiguration",
+        "nofunos main push",
+        "P5 repeat submission"
+      ],
+      "authorityRefs": [
+        {
+          "source": "user",
+          "ref": "J01 job assignment 2026-10-17"
+        }
+      ],
+      "acceptanceCriteria": [
+        {
+          "id": "delivery",
+          "text": "Admitted real child, durable receipt, root integration; same identity after lost ACK/resume; actual current role; old build refused."
+        }
+      ],
+      "decisions": []
+    },
+    "integrationTarget": {
+      "summary": "Branch-only evidence inventory and J02 handoff",
+      "branch": "job/J01"
+    },
+    "managers": {
+      "delivery": {
+        "threadId": "mcp:23961559-6c8b-4122-aa45-635a723d1e7a",
+        "epoch": 0
+      }
+    },
+    "status": "active",
+    "tasks": [
+      {
+        "id": "J01-F04-evidence-inventory",
+        "projectId": "0a02a180-288c-4e5f-8100-8d5c445f5988",
+        "title": "Inventory installed F04 and c67d receipts for the J02 handoff",
+        "specHash": "J01-F04-evidence-inventory-v1",
+        "dependencyHashes": [],
+        "dependencies": [],
+        "acceptanceIds": [
+          "delivery"
+        ],
+        "updatedAt": "2026-10-18T00:56:46.981Z"
+      }
+    ],
+    "updatedAt": "2026-10-18T00:56:46.981Z"
+  },
+  "retroRole": {
+    "_tag": "MissionLifecycleMcpFailure",
+    "code": "scope_denied"
+  },
+  "ackFaultInjection": {
+    "scope": "client-visible response discarded, no server restart/network disconnection/child dispatch",
+    "firstRejectedCommand": {
+      "type": "mission.replace",
+      "commandId": "J01-r2-observation-lost-client-ack-v1",
+      "expectedRevision": 0,
+      "epoch": 0,
+      "authority": {
+        "source": "user",
+        "ref": "d181 J01 r2 retry 2026-10-18; PM evt_35085dd5dca3"
+      },
+      "mission": {
+        "schemaVersion": 1,
+        "id": "J01-installed-single-host-20261017",
+        "revision": 1,
+        "teamId": "nofun",
+        "authorityEnvironmentId": "87edc8b7-26a6-4ce2-8159-d0c483a11246",
+        "projectTimezone": "America/Denver",
+        "bindings": [
+          {
+            "projectId": "0a02a180-288c-4e5f-8100-8d5c445f5988",
+            "workspaceRoot": "/Users/nofun/Documents/Codex/2026-10-15/nofun-canvas-checkpoint",
+            "baseCommit": "4155c53d141d8cd775a72ed6e1765bc7c5b593c5",
+            "ancestry": [
+              "4155c53d141d8cd775a72ed6e1765bc7c5b593c5"
+            ]
+          }
+        ],
+        "intent": {
+          "outcome": "Produce an independently checked F04 installed-runtime evidence inventory and J02 handoff through one canonical mission.",
+          "scope": [
+            "Read installed F04 identity and existing P4/P5 receipts; one admitted evidence-inventory child and root integration."
+          ],
+          "exclusions": [
+            "T3 install, quit, restart, reconfiguration",
+            "nofunos main push",
+            "P5 repeat submission"
+          ],
+          "authorityRefs": [
+            {
+              "source": "user",
+              "ref": "J01 job assignment 2026-10-17"
+            }
+          ],
+          "acceptanceCriteria": [
+            {
+              "id": "delivery",
+              "text": "Admitted real child, durable receipt, root integration; same identity after lost ACK/resume; actual current role; old build refused."
+            }
+          ],
+          "decisions": [
+            {
+              "id": "J01-r2-runtime-observation",
+              "text": "Installed F04 identity and startup policy activation verified. Mission creation and replay accepted; canonical child admission remains unproved pending an installed supported dispatch route. No T3 changes or builds allowed.",
+              "authority": {
+                "source": "J01-root-observed-runtime",
+                "ref": "jobs/J01/r2/installed-initial.json"
+              }
+            }
+          ]
+        },
+        "integrationTarget": {
+          "summary": "Branch-only evidence inventory and J02 handoff",
+          "branch": "job/J01"
+        },
+        "managers": {
+          "delivery": {
+            "threadId": "mcp:23961559-6c8b-4122-aa45-635a723d1e7a",
+            "epoch": 0
+          }
+        },
+        "status": "active",
+        "tasks": [
+          {
+            "id": "J01-F04-evidence-inventory",
+            "projectId": "0a02a180-288c-4e5f-8100-8d5c445f5988",
+            "title": "Inventory installed F04 and c67d receipts for the J02 handoff",
+            "specHash": "J01-F04-evidence-inventory-v1",
+            "dependencyHashes": [],
+            "dependencies": [],
+            "acceptanceIds": [
+              "delivery"
+            ],
+            "updatedAt": "2026-10-18T00:56:46.981Z"
+          }
+        ],
+        "updatedAt": "2026-10-18T21:40:22.394Z"
+      }
+    },
+    "firstRejectedResult": {
+      "_tag": "MissionMcpFailure",
+      "code": "plan_rejected",
+      "message": "The mission command was rejected (authority_mismatch)."
+    },
+    "correctedCommand": {
+      "type": "mission.replace",
+      "commandId": "J01-r2-observation-lost-client-ack-v2",
+      "expectedRevision": 0,
+      "epoch": 0,
+      "authority": {
+        "source": "user",
+        "ref": "J01 job assignment 2026-10-17"
+      },
+      "mission": {
+        "schemaVersion": 1,
+        "id": "J01-installed-single-host-20261017",
+        "revision": 1,
+        "teamId": "nofun",
+        "authorityEnvironmentId": "87edc8b7-26a6-4ce2-8159-d0c483a11246",
+        "projectTimezone": "America/Denver",
+        "bindings": [
+          {
+            "projectId": "0a02a180-288c-4e5f-8100-8d5c445f5988",
+            "workspaceRoot": "/Users/nofun/Documents/Codex/2026-10-15/nofun-canvas-checkpoint",
+            "baseCommit": "4155c53d141d8cd775a72ed6e1765bc7c5b593c5",
+            "ancestry": [
+              "4155c53d141d8cd775a72ed6e1765bc7c5b593c5"
+            ]
+          }
+        ],
+        "intent": {
+          "outcome": "Produce an independently checked F04 installed-runtime evidence inventory and J02 handoff through one canonical mission.",
+          "scope": [
+            "Read installed F04 identity and existing P4/P5 receipts; one admitted evidence-inventory child and root integration."
+          ],
+          "exclusions": [
+            "T3 install, quit, restart, reconfiguration",
+            "nofunos main push",
+            "P5 repeat submission"
+          ],
+          "authorityRefs": [
+            {
+              "source": "user",
+              "ref": "J01 job assignment 2026-10-17"
+            }
+          ],
+          "acceptanceCriteria": [
+            {
+              "id": "delivery",
+              "text": "Admitted real child, durable receipt, root integration; same identity after lost ACK/resume; actual current role; old build refused."
+            }
+          ],
+          "decisions": [
+            {
+              "id": "J01-r2-runtime-observation",
+              "text": "Installed F04 identity and startup policy activation verified. Mission creation and replay accepted; canonical child admission remains unproved pending an installed supported dispatch route. No T3 changes or builds allowed.",
+              "authority": {
+                "source": "J01-root-observed-runtime",
+                "ref": "jobs/J01/r2/installed-initial.json"
+              }
+            }
+          ]
+        },
+        "integrationTarget": {
+          "summary": "Branch-only evidence inventory and J02 handoff",
+          "branch": "job/J01"
+        },
+        "managers": {
+          "delivery": {
+            "threadId": "mcp:23961559-6c8b-4122-aa45-635a723d1e7a",
+            "epoch": 0
+          }
+        },
+        "status": "active",
+        "tasks": [
+          {
+            "id": "J01-F04-evidence-inventory",
+            "projectId": "0a02a180-288c-4e5f-8100-8d5c445f5988",
+            "title": "Inventory installed F04 and c67d receipts for the J02 handoff",
+            "specHash": "J01-F04-evidence-inventory-v1",
+            "dependencyHashes": [],
+            "dependencies": [],
+            "acceptanceIds": [
+              "delivery"
+            ],
+            "updatedAt": "2026-10-18T00:56:46.981Z"
+          }
+        ],
+        "updatedAt": "2026-10-18T21:40:22.394Z"
+      }
+    },
+    "withheldCommitResponse": {
+      "missionId": "J01-installed-single-host-20261017",
+      "commandId": "J01-r2-observation-lost-client-ack-v2",
+      "committed": true,
+      "resultSequence": 1788541,
+      "status": "accepted"
+    },
+    "resumedState": {
+      "schemaVersion": 1,
+      "id": "J01-installed-single-host-20261017",
+      "revision": 1,
+      "teamId": "nofun",
+      "authorityEnvironmentId": "87edc8b7-26a6-4ce2-8159-d0c483a11246",
+      "projectTimezone": "America/Denver",
+      "bindings": [
+        {
+          "projectId": "0a02a180-288c-4e5f-8100-8d5c445f5988",
+          "workspaceRoot": "/Users/nofun/Documents/Codex/2026-10-15/nofun-canvas-checkpoint",
+          "baseCommit": "4155c53d141d8cd775a72ed6e1765bc7c5b593c5",
+          "ancestry": [
+            "4155c53d141d8cd775a72ed6e1765bc7c5b593c5"
+          ]
+        }
+      ],
+      "intent": {
+        "outcome": "Produce an independently checked F04 installed-runtime evidence inventory and J02 handoff through one canonical mission.",
+        "scope": [
+          "Read installed F04 identity and existing P4/P5 receipts; one admitted evidence-inventory child and root integration."
+        ],
+        "exclusions": [
+          "T3 install, quit, restart, reconfiguration",
+          "nofunos main push",
+          "P5 repeat submission"
+        ],
+        "authorityRefs": [
+          {
+            "source": "user",
+            "ref": "J01 job assignment 2026-10-17"
+          }
+        ],
+        "acceptanceCriteria": [
+          {
+            "id": "delivery",
+            "text": "Admitted real child, durable receipt, root integration; same identity after lost ACK/resume; actual current role; old build refused."
+          }
+        ],
+        "decisions": [
+          {
+            "id": "J01-r2-runtime-observation",
+            "text": "Installed F04 identity and startup policy activation verified. Mission creation and replay accepted; canonical child admission remains unproved pending an installed supported dispatch route. No T3 changes or builds allowed.",
+            "authority": {
+              "source": "J01-root-observed-runtime",
+              "ref": "jobs/J01/r2/installed-initial.json"
+            }
+          }
+        ]
+      },
+      "integrationTarget": {
+        "summary": "Branch-only evidence inventory and J02 handoff",
+        "branch": "job/J01"
+      },
+      "managers": {
+        "delivery": {
+          "threadId": "mcp:23961559-6c8b-4122-aa45-635a723d1e7a",
+          "epoch": 0
+        }
+      },
+      "status": "active",
+      "tasks": [
+        {
+          "id": "J01-F04-evidence-inventory",
+          "projectId": "0a02a180-288c-4e5f-8100-8d5c445f5988",
+          "title": "Inventory installed F04 and c67d receipts for the J02 handoff",
+          "specHash": "J01-F04-evidence-inventory-v1",
+          "dependencyHashes": [],
+          "dependencies": [],
+          "acceptanceIds": [
+            "delivery"
+          ],
+          "updatedAt": "2026-10-18T00:56:46.981Z"
+        }
+      ],
+      "updatedAt": "2026-10-18T21:40:22.394Z"
+    },
+    "replayedCommandReceipt": {
+      "missionId": "J01-installed-single-host-20261017",
+      "commandId": "J01-r2-observation-lost-client-ack-v2",
+      "committed": false,
+      "resultSequence": 1788541,
+      "status": "accepted"
+    }
+  }
+}

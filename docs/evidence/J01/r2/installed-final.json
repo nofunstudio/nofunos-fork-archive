@@ -1,0 +1,64 @@
+{
+  "observedAt": "2026-10-18T21:42:09.335037+00:00",
+  "runtimePID": 59384,
+  "runtimeStartedAt": "2026-10-18T21:27:35.347Z",
+  "appAsarSHA256": "4ffcf4c7d9d59d0f7341993b8fc632ce21a2523371be4b09fa51c47e8325dd2a",
+  "policySHA256": "f2e616596c55de4aad4944d2e00ac456e892a387524183d24a4be36fa8668e7b",
+  "identityUnchanged": true,
+  "databaseReadOnly": true,
+  "missionId": "J01-installed-single-host-20261017",
+  "missionRevision": 1,
+  "managers": {
+    "delivery": {
+      "threadId": "mcp:23961559-6c8b-4122-aa45-635a723d1e7a",
+      "epoch": 0
+    }
+  },
+  "admissionCount": 0,
+  "commandRecords": {
+    "J01-installed-single-host-create-v1": {
+      "receipts": [
+        [
+          1788408,
+          "accepted",
+          "mission.create"
+        ]
+      ],
+      "events": [
+        [
+          1788408,
+          "mission.created"
+        ]
+      ]
+    },
+    "J01-r2-observation-lost-client-ack-v1": {
+      "receipts": [
+        [
+          0,
+          "rejected",
+          "mission.replace"
+        ]
+      ],
+      "events": []
+    },
+    "J01-r2-observation-lost-client-ack-v2": {
+      "receipts": [
+        [
+          1788541,
+          "accepted",
+          "mission.replace"
+        ]
+      ],
+      "events": [
+        [
+          1788541,
+          "mission.revised"
+        ]
+      ]
+    }
+  },
+  "P5AnswerAttachmentHashesStillMatch": true,
+  "builds": 0,
+  "T3Modifications": 0,
+  "childrenStarted": 0
+}

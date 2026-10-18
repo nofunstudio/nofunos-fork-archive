@@ -1,0 +1,15 @@
+{
+  "sourceTip": "4155c53d141d8cd775a72ed6e1765bc7c5b593c5",
+  "files": {
+    "packages/contracts/src/orchestratorMcp.ts": "c7a754eb689766b4aa746a1c0b002fa6e5df3766d61a48eecb0ddad5b3ee0770",
+    "apps/server/src/mcp/OrchestratorMcpService.ts": "f81e991729e4eed7b3b9d5147e24c6a64f58d2d2bed23fc89949735c4d5edb09",
+    "apps/server/src/orchestration-v2/ThreadManagementService.ts": "c1c709c0d0788345061c7c53108a69bd58ebf5c05d1b1ebcc1739a8f58c63cae",
+    "apps/server/src/orchestration-v2/runtimeLayer.ts": "323826f2e8715448d8c86887f5492d2e245f38cd8662fc5dc5b247e622b52380",
+    "apps/server/src/mcp/MissionMcpRuntime.ts": "fcd606efcd16f15e50b9a136cdd8922a028ef915dc205b31dedaa39a1de9a819"
+  },
+  "publicAdmissionToolPresent": false,
+  "delegateMissionAdmissionParameterPresent": false,
+  "delegateDispatchOptionsPresent": false,
+  "productionMissionAdmissionStoreLayerCompositionFound": false,
+  "notes": "Source inspection of exact F04 source, separately bound to installed app ASAR hash. Ordinary delegate is not canonical mission admission."
+}
