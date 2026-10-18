@@ -2,7 +2,7 @@ import type { ServerProviderUsageWindow } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
 
-import { usageHeadroom } from "./usageHeadroom.ts";
+import { museUsageForRouting, usageHeadroom } from "./usageHeadroom.ts";
 
 const NOW = Date.parse("2026-10-08T00:00:00.000Z");
 const at = (minutes: number) => DateTime.formatIso(DateTime.makeUnsafe(NOW + minutes * 60_000));
@@ -159,6 +159,36 @@ describe("usageHeadroom", () => {
     ).toEqual({
       headroom: "unknown",
       summary: "usage stale (a window reset since the last check)",
+    });
+  });
+
+  it("keeps a Muse weekly window after the 5-hour window has reset", () => {
+    const observedAt = at(-6 * 60);
+    const limits = {
+      checkedAt: observedAt,
+      windows: [
+        window("session", 83, -5 * 60, "5-hour"),
+        window("weekly", 39, 20 * 60, "Weekly"),
+      ],
+    };
+    expect(usageHeadroom(limits, NOW)).toEqual({
+      headroom: "unknown",
+      summary: "usage observation is stale or unavailable",
+    });
+    const routed = museUsageForRouting(limits, NOW);
+    const result = usageHeadroom(routed.limits, NOW, {
+      maxObservationAgeMs: routed.maxObservationAgeMs,
+    });
+    expect(result.headroom).toBe("ok");
+    expect(result.summary).toBe("weekly 61% left (resets in 20h 0m)");
+  });
+
+  it("does not replenish Muse when every window reset since the reading", () => {
+    const limits = staleLimits(window("session", 10, -60, "5-hour"));
+    const routed = museUsageForRouting(limits, NOW);
+    expect(usageHeadroom(routed.limits, NOW, { maxObservationAgeMs: routed.maxObservationAgeMs })).toEqual({
+      headroom: "unknown",
+      summary: "usage observation is stale or unavailable",
     });
   });
 

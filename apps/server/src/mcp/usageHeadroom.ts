@@ -27,6 +27,13 @@ export interface UsageHeadroomOptions {
 /** Below this share left, a window is worth preserving. */
 const LOW_PERCENT = 15;
 
+/**
+ * Muse quota is observed only during useful work, so a 30-minute budget marks
+ * a still-open weekly window stale. Twelve hours is long enough for that
+ * passive reading and short of treating yesterday's weekly as current.
+ */
+const MUSE_OBSERVATION_BUDGET_MS = 12 * 60 * 60_000;
+
 const WINDOW_NAME: Record<ServerProviderUsageWindow["kind"], string> = {
   session: "5h",
   weekly: "weekly",
@@ -77,6 +84,39 @@ function gatingWindows(limits: ServerProviderUsageLimits, model: string | undefi
       model === undefined ||
       modelScopeApplies(window.appliesToModel, model),
   );
+}
+
+/**
+ * Muse routing view. A window whose reset passed since the observation is
+ * dropped, so a replenished 5-hour pool cannot be treated as still spent or
+ * still full. Windows that have not reset keep the reading for
+ * {@link MUSE_OBSERVATION_BUDGET_MS}. When every window has reset, the
+ * original snapshot is returned so headroom stays unknown.
+ */
+export function museUsageForRouting(
+  limits: ServerProviderUsageLimits | undefined,
+  nowMs: number,
+): {
+  readonly limits: ServerProviderUsageLimits | undefined;
+  readonly maxObservationAgeMs: number;
+} {
+  if (!limits || limits.unavailable) {
+    return { limits, maxObservationAgeMs: MUSE_OBSERVATION_BUDGET_MS };
+  }
+  const checkedMs = Date.parse(limits.checkedAt);
+  const windows = limits.windows.filter((window) => {
+    if (!window.resetsAt) return true;
+    const resetMs = Date.parse(window.resetsAt);
+    if (!Number.isFinite(resetMs) || resetMs > nowMs) return true;
+    return Number.isFinite(checkedMs) && checkedMs > resetMs;
+  });
+  if (windows.length === 0) {
+    return { limits, maxObservationAgeMs: 30 * 60_000 };
+  }
+  return {
+    limits: windows.length === limits.windows.length ? limits : { ...limits, windows },
+    maxObservationAgeMs: MUSE_OBSERVATION_BUDGET_MS,
+  };
 }
 
 export function usageHeadroom(

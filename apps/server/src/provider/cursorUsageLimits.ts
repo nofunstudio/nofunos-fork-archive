@@ -1,4 +1,6 @@
 import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+import * as NodeSqlite from "node:sqlite";
 import type { CursorSettings, ServerProviderUsageWindow } from "@t3tools/contracts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { CURSOR_USAGE_WINDOWS } from "@t3tools/shared/usageLimits";
@@ -18,6 +20,42 @@ import { readMacCursorAccessToken } from "./cursorKeychainToken.ts";
 
 const CursorCredentials = Schema.Struct({ accessToken: Schema.optional(Schema.String) });
 const DEFAULT_CURSOR_API_ENDPOINT = "https://api2.cursor.sh";
+const DESKTOP_ACCESS_TOKEN_KEY = "cursorAuth/accessToken";
+
+/** Cursor.app stores the session `agent status` would use, beside the CLI login. */
+export function cursorDesktopStatePath(home: string): string {
+  return NodePath.join(
+    home,
+    "Library",
+    "Application Support",
+    "Cursor",
+    "User",
+    "globalStorage",
+    "state.vscdb",
+  );
+}
+
+/**
+ * Read the desktop session token for the usage endpoint. This is not a model
+ * call. A missing database or row stays logged-out.
+ */
+export function readCursorDesktopAccessToken(home = NodeOS.homedir()): Promise<string | null> {
+  return Promise.resolve().then(() => {
+    let database: NodeSqlite.DatabaseSync | undefined;
+    try {
+      database = new NodeSqlite.DatabaseSync(cursorDesktopStatePath(home), { readOnly: true });
+      const row = database
+        .prepare("SELECT value FROM ItemTable WHERE key = ?")
+        .get(DESKTOP_ACCESS_TOKEN_KEY) as { value?: unknown } | undefined;
+      const token = typeof row?.value === "string" ? row.value.trim() : "";
+      return token.length > 0 ? token : null;
+    } catch {
+      return null;
+    } finally {
+      database?.close();
+    }
+  });
+}
 const decodeCredentials = Schema.decodeEffect(Schema.fromJsonString(CursorCredentials));
 const CursorUsageResponse = Schema.Struct({
   billingCycleEnd: Schema.optional(Schema.Union([Schema.String, Schema.Number])),
@@ -64,6 +102,7 @@ export const readCursorUsageLimits = Effect.fn("readCursorUsageLimits")(function
   environment: NodeJS.ProcessEnv = process.env,
   allowKeychain = false,
   keychainToken: () => Promise<string | null> = readMacCursorAccessToken,
+  desktopToken: () => Promise<string | null> = async () => null,
 ) {
   const checkedAt = DateTime.formatIso(yield* DateTime.now);
   return yield* Effect.gen(function* () {
@@ -89,13 +128,9 @@ export const readCursorUsageLimits = Effect.fn("readCursorUsageLimits")(function
       });
     }
     if (!token && platform === "darwin" && credentialStore !== "file") {
-      if (!allowKeychain) {
-        return makeUnavailableUsageLimits({
-          checkedAt,
-          reason: "unsupported",
-          message: "Enable Cursor account usage in T3 Code to read its Keychain login.",
-        });
-      }
+      // The usage RPC is free, but it wants the session token from `agent status`,
+      // not an API key. Keychain is that CLI login. The desktop state database
+      // holds the same kind of token when the CLI itself is logged out.
       if (endpoint !== DEFAULT_CURSOR_API_ENDPOINT) {
         return makeUnavailableUsageLimits({
           checkedAt,
@@ -103,7 +138,18 @@ export const readCursorUsageLimits = Effect.fn("readCursorUsageLimits")(function
           message: "Cursor account usage requires the default Cursor endpoint when using Keychain.",
         });
       }
-      token = (yield* Effect.tryPromise(keychainToken))?.trim();
+      if (allowKeychain) {
+        token = (yield* Effect.tryPromise(keychainToken))?.trim();
+        // The CLI keychain is often empty while Cursor.app still has a session.
+        if (!token) token = (yield* Effect.tryPromise(desktopToken))?.trim();
+      }
+      if (!token && !allowKeychain) {
+        return makeUnavailableUsageLimits({
+          checkedAt,
+          reason: "unsupported",
+          message: "Enable Cursor account usage in T3 Code to read its Keychain login.",
+        });
+      }
     } else if (!token) {
       const home =
         (platform === "win32" ? environment.USERPROFILE : environment.HOME) || NodeOS.homedir();

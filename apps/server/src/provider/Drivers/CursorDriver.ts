@@ -13,7 +13,11 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { HttpClient } from "effect/http";
-import { readCursorUsageLimits } from "../cursorUsageLimits.ts";
+import { readMacCursorAccessToken } from "../cursorKeychainToken.ts";
+import {
+  readCursorDesktopAccessToken,
+  readCursorUsageLimits,
+} from "../cursorUsageLimits.ts";
 
 import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
 import * as ServerConfig from "../../config.ts";
@@ -222,6 +226,8 @@ export const CursorDriver: ProviderDriver<CursorSettings, CursorDriverEnv> = {
                         // must not hide the account's limits.
                         auth.usesApiKey ? { ...processEnv, CURSOR_API_KEY: apiKey } : processEnv,
                         settings.cursorKeychainUsageEnabled,
+                        readMacCursorAccessToken,
+                        readCursorDesktopAccessToken,
                       ),
                     ),
                     Effect.map((usageLimits) => ({ ...snapshot, usageLimits })),

@@ -73,7 +73,7 @@ import * as Stream from "effect/Stream";
 
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as MuseUsage from "../nofun/MuseUsage.ts";
-import { usageHeadroom } from "./usageHeadroom.ts";
+import { museUsageForRouting, usageHeadroom } from "./usageHeadroom.ts";
 import * as IdAllocator from "../orchestration-v2/IdAllocator.ts";
 import {
   subagentResultForRun,
@@ -1861,10 +1861,16 @@ const make = Effect.gen(function* () {
               canRunChildTask: constraints.length === 0,
               canRunCrossProviderChildTask: constraints.length === 0,
               constraints: [...constraints],
-              usage: usageHeadroom(
-                provider.usageLimits ?? museLimits.get(String(provider.instanceId)),
-                nowMs,
-              ),
+              usage: (() => {
+                const muse = museLimits.get(String(provider.instanceId));
+                if (provider.usageLimits === undefined && muse !== undefined) {
+                  const routed = museUsageForRouting(muse, nowMs);
+                  return usageHeadroom(routed.limits, nowMs, {
+                    maxObservationAgeMs: routed.maxObservationAgeMs,
+                  });
+                }
+                return usageHeadroom(provider.usageLimits ?? muse, nowMs);
+              })(),
             };
           }),
           features: {

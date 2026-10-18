@@ -1,11 +1,19 @@
 import { describe, expect, it } from "@effect/vitest";
 import { NodeServices } from "@effect/platform-node";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+import * as NodeSqlite from "node:sqlite";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import { HttpClient, HttpClientResponse } from "effect/http";
-import { cursorUsageResponseToLimits, readCursorUsageLimits } from "./cursorUsageLimits.ts";
+import {
+  cursorDesktopStatePath,
+  cursorUsageResponseToLimits,
+  readCursorDesktopAccessToken,
+  readCursorUsageLimits,
+} from "./cursorUsageLimits.ts";
 
 const withNodeServices = <A, E>(effect: Effect.Effect<A, E, FileSystem.FileSystem | Path.Path>) =>
   effect.pipe(Effect.provide(NodeServices.layer));
@@ -234,6 +242,66 @@ describe("Cursor usage limits", () => {
         ),
       );
       expect(limits.unavailable?.reason).toBe("probeFailed");
+    }),
+  );
+
+  it("reads the desktop session token without a CLI login", async () => {
+    const home = NodePath.join(NodeOS.tmpdir(), `cursor-usage-${Date.now()}`);
+    const dbPath = cursorDesktopStatePath(home);
+    const { mkdirSync, rmSync } = await import("node:fs");
+    mkdirSync(NodePath.dirname(dbPath), { recursive: true });
+    const db = new NodeSqlite.DatabaseSync(dbPath);
+    db.exec("CREATE TABLE ItemTable (key TEXT, value TEXT)");
+    db.prepare("INSERT INTO ItemTable (key, value) VALUES (?, ?)").run(
+      "cursorAuth/accessToken",
+      "desktop-session",
+    );
+    db.close();
+    try {
+      await expect(readCursorDesktopAccessToken(home)).resolves.toBe("desktop-session");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+    await expect(readCursorDesktopAccessToken(home)).resolves.toBeNull();
+  });
+
+  it.effect("uses the desktop session for the usage endpoint when agent status has no CLI login", () =>
+    Effect.gen(function* () {
+      const limits = yield* withNodeServices(
+        readCursorUsageLimits(
+          { apiEndpoint: "" },
+          {},
+          true,
+          async () => null,
+          async () => "desktop-session",
+        ).pipe(
+          Effect.provideService(HostProcessPlatform, "darwin"),
+          Effect.provideService(
+            HttpClient.HttpClient,
+            HttpClient.make((request) => {
+              expect(request.url).toBe(
+                "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage",
+              );
+              expect(request.headers.authorization).toBe("Bearer desktop-session");
+              return Effect.succeed(
+                HttpClientResponse.fromWeb(
+                  request,
+                  Response.json({
+                    billingCycleEnd: "1792861901599",
+                    planUsage: { totalPercentUsed: 41.15, autoPercentUsed: 41.15, apiPercentUsed: 0 },
+                  }),
+                ),
+              );
+            }),
+          ),
+        ),
+      );
+      expect(limits.unavailable).toBeUndefined();
+      expect(limits.windows.find((window) => window.id === "totalPercentUsed")).toMatchObject({
+        usedPercent: 41.15,
+        resetsAt: "2026-10-24T17:11:41.599Z",
+      });
+      expect(limits.windows.find((window) => window.id === "apiPercentUsed")?.usedPercent).toBe(0);
     }),
   );
 
