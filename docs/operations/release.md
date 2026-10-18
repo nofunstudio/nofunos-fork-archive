@@ -607,3 +607,11 @@ Checklist:
 - Build fails with signing error:
   - Retry with secrets removed to confirm unsigned path still works.
   - Re-check certificate/profile names and tenant/client credentials.
+
+## 6) No Fun installs on Nos and the M1
+
+Nos and the M1 must run the same packaged build. The owner-machine update
+process (build once with `scripts/build-desktop-artifact.ts`, ad-hoc sign,
+install on the M1 first and then Nos, verify byte-identical) and the read-only
+side-by-side check `t3-versions.sh` live in `nofunstudio/nofun-skills`:
+`skills/workflow/t3-code/references/update-both-macs.md`.
