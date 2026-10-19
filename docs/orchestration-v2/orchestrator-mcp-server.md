@@ -206,9 +206,10 @@ The attempt key uses the canonical admission identity; a client request id
 cannot authorize another attempt. Omit `mission` for ordinary delegation.
 
 Mission calls stay denied before creating a worktree or child when trusted
-admission authority is unavailable. The current canonical task/provider
-contracts do not yet retain the scope and attestation required for healthy
-admission; supplying a mission selector does not bypass that refusal.
+admission authority is unavailable. Canonical task scopes and provider
+attestations now survive the B-02c contracts, but their trusted facts producer
+and request binding are not wired at this entry point (B-02d). A selector or
+caller-supplied authority does not bypass that refusal.
 
 ### `delegate_task`
 

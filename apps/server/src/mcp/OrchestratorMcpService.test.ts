@@ -1341,6 +1341,29 @@ describe("OrchestratorMcpService provider resolution", () => {
       }),
     );
 
+    it.effect("keeps B-02c scope and provider authority out of the public selector", () =>
+      Effect.gen(function* () {
+        const decoded = yield* decodeInput({
+          task: "Implement the mission task.",
+          mission: {
+            ...missionInput,
+            writerScope: "/workspace/project/src",
+            sharedManifestScopes: [],
+            guiScopes: [],
+            taskNecessary: true,
+            admissionAttestation: {
+              accountId: "caller-account",
+              company: "No Fun",
+              billingMode: "subscription",
+              verifiedAtMs: 1,
+              routes: [],
+            },
+          },
+        });
+        assert.deepEqual(decoded.mission, missionInput);
+      }),
+    );
+
     it.effect(
       "rejects invalid attempt identities instead of treating them as ordinary delegation",
       () =>
