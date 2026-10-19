@@ -1894,6 +1894,14 @@ const make = Effect.gen(function* () {
     delegateTask: (callerScope, input) =>
       Effect.gen(function* () {
         const { scope, parent } = yield* loadThreadCaller(callerScope, "delegate_task");
+        // A mission selector must never fall through to ordinary delegation.
+        // Request-bound admission authority is not wired at this entry point yet.
+        if (input.mission !== undefined) {
+          return yield* failure(
+            "orchestration_error",
+            "Mission admission/runtime authority is not configured.",
+          );
+        }
         const task = taskPrompt(input);
         // Declared references are checked before anything else, retries
         // included, so a bad one never reaches a key, a lookup, or a dispatch.
