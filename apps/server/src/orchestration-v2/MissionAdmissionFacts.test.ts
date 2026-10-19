@@ -49,11 +49,9 @@ const decodeTaskJson = Schema.decodeUnknownSync(Schema.fromJsonString(MissionTas
 const encodeMissionJson = Schema.encodeEffect(Schema.fromJsonString(Mission));
 const isDispatchError = Schema.is(Orchestrator.OrchestratorDispatchError);
 
-// B-02 prerequisite: production readFacts must obtain scope from the canonical
-// task, never from the proposal. Keep this regression red until the owning
-// contract/persistence lane supplies that authority; do not invent a scope.
-// Expected failure records the frozen Nos lane's reproduced prerequisite gap.
-it.fails("canonical mission tasks retain admission scope through persistence", () => {
+// Scope is read from the canonical task, never from the proposal. These
+// fields must survive persistence so a later read can use them.
+it("canonical mission tasks retain admission scope through persistence", () => {
   const task = {
     id: "task-admission",
     projectId: "project-admission",
