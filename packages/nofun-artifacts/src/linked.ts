@@ -252,7 +252,7 @@ async function userCss(dir: string, tsx: string, runtimeCss: string | undefined)
  * `bodyFor` + `theme(brand, {scheme})` and are untouched.
  */
 export function htmlTag(theme: string, scheme: "light" | "dark" | undefined): string {
-  if (theme === T3_THEME && scheme !== "light") return `<!doctype html><html lang="en" class="dark">`;
+  if (theme === T3_THEME && scheme === "dark") return `<!doctype html><html lang="en" class="dark">`;
   return `<!doctype html><html lang="en">`;
 }
 

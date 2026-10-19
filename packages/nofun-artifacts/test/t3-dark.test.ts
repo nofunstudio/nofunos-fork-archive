@@ -12,8 +12,8 @@ import { NO_BLUE_T3_CSS, PRESETS } from "../src/presets.ts";
 
 test("htmlTag marks dark t3 pages on <html> and leaves everything else bare", () => {
   assert.equal(htmlTag("t3", "dark"), `<!doctype html><html lang="en" class="dark">`);
-  // t3 defaults to dark: the canvas-t3 preset pins it and the bar is dark-mode only.
-  assert.equal(htmlTag("t3", undefined), `<!doctype html><html lang="en" class="dark">`);
+  // A bare t3 page stays light: only an explicit dark scheme (e.g. the canvas-t3 preset) marks it.
+  assert.equal(htmlTag("t3", undefined), `<!doctype html><html lang="en">`);
   assert.equal(htmlTag("t3", "light"), `<!doctype html><html lang="en">`);
   // Branded themes own their marker through bodyFor + theme(brand, {scheme}).
   assert.equal(htmlTag("kobra", "dark"), `<!doctype html><html lang="en">`);
