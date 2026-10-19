@@ -1,9 +1,16 @@
-// @effect-diagnostics-next-line nodeBuiltinImport:off -- Effect's Crypto has no createHmac.
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- Effect's Crypto has no createHmac or generateKeyPairSync.
 import * as NodeCrypto from "node:crypto";
 
 import * as NodePlatformCrypto from "@effect/platform-node/NodeCrypto";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
-import { ScheduledTaskUpsertInput, SecretRequestError } from "@t3tools/contracts";
+import {
+  EnvironmentHttpApi,
+  EnvironmentId,
+  ScheduledTaskUpsertInput,
+  SecretRequestError,
+} from "@t3tools/contracts";
+import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -11,6 +18,18 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Metric from "effect/Metric";
 import * as Queue from "effect/Queue";
+import * as Option from "effect/Option";
+import * as Redacted from "effect/Redacted";
+import * as Etag from "effect/http/Etag";
+import * as HttpClient from "effect/http/HttpClient";
+import * as HttpClientResponse from "effect/http/HttpClientResponse";
+import * as HttpEffect from "effect/http/HttpEffect";
+import * as HttpPlatform from "effect/http/HttpPlatform";
+import * as HttpRouter from "effect/http/HttpRouter";
+import * as HttpServerRequest from "effect/http/HttpServerRequest";
+import * as HttpServerResponse from "effect/http/HttpServerResponse";
+import * as HttpApi from "effect/http-api/HttpApi";
+import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 import * as EffectScheduler from "effect/Scheduler";
 import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
@@ -21,8 +40,18 @@ import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as ScheduledTaskService from "./ScheduledTaskService.ts";
+import * as WebhookRoute from "./webhookRoute.ts";
+import * as RelayDeliveryProof from "./RelayDeliveryProof.ts";
+import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import { CLOUD_MINT_PUBLIC_KEY, RELAY_ISSUER_SECRET } from "../cloud/config.ts";
+import * as HookForwarder from "../../../../infra/relay/src/hooks/HookForwarder.ts";
+import * as HeldHooks from "../../../../infra/relay/src/hooks/HeldHooks.ts";
+import * as HookInbox from "../../../../infra/relay/src/hooks/HookInbox.ts";
+import * as RelayConfiguration from "../../../../infra/relay/src/Config.ts";
 
 const decodeUpsertInput = Schema.decodeUnknownEffect(ScheduledTaskUpsertInput);
+const encodePayload = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 
 type LaunchInput = ThreadLaunchService.ThreadLaunchInput;
 
@@ -894,4 +923,404 @@ it.effect("counts each handled request by what happened to it", () =>
       assert.equal((yield* deliveriesCounted("duplicate", "relay")) - before.duplicate, 1);
     }),
   ),
+);
+
+const standardSecret = `whsec_${Buffer.from("fixed-standard-webhooks-key").toString("base64")}`;
+const standardTaskInput = (overrides: Record<string, unknown> = {}) =>
+  webhookTaskInput({
+    prompt: "{{body.type}} {{body.data.source_message_id}}",
+    schedule: {
+      type: "webhook",
+      signature: { scheme: "standard-webhooks", secret: standardSecret },
+    },
+    ...overrides,
+  });
+const standardRequest = Effect.fn("standardRequest")(function* (
+  task: Parameters<typeof requestFor>[0],
+  id: string,
+  payload: unknown = { type: "message.created", data: { source_message_id: "source-1" } },
+) {
+  const bodyText = yield* encodePayload(payload);
+  const timestamp = String(Math.floor((yield* Clock.currentTimeMillis) / 1_000));
+  return requestFor(task, {
+    bodyText,
+    body: new TextEncoder().encode(bodyText),
+    headers: {
+      "content-type": "application/json",
+      "webhook-id": id,
+      "webhook-timestamp": timestamp,
+      "webhook-signature": `v1,${NodeCrypto.createHmac(
+        "sha256",
+        Buffer.from(standardSecret.slice(6), "base64"),
+      )
+        .update(`${id}.${timestamp}.${bodyText}`)
+        .digest("base64")}`,
+    },
+  });
+});
+
+it.effect(
+  "echoes only a signed Standard Webhooks challenge and records verification without a run",
+  () =>
+    withService(({ service, launches, secretsByRef }) =>
+      Effect.gen(function* () {
+        const secretRef = "secret:standard";
+        secretsByRef.set(secretRef, standardSecret);
+        const { task } = yield* service.upsert(
+          yield* standardTaskInput({
+            schedule: { type: "webhook", signature: { scheme: "standard-webhooks", secretRef } },
+          }),
+        );
+        assert.equal(
+          task.schedule.type === "webhook" && task.schedule.signature?.scheme,
+          "standard-webhooks",
+        );
+        const request = yield* standardRequest(task, "verification-1", {
+          type: "verification",
+          challenge: "abc",
+        });
+        const result = yield* service.triggerWebhook(request);
+        assert.equal(result._tag, "verification");
+        if (result._tag !== "verification") return;
+        assert.equal(result.challenge, "abc");
+        assert.deepEqual(yield* service.triggerWebhook(request), result);
+        assert.equal(yield* Queue.size(launches), 0);
+        const { deliveries } = yield* service.listWebhookDeliveries({ id: task.id });
+        assert.equal(deliveries.length, 1);
+        assert.equal(deliveries[0]?.outcome, "verification");
+        assert.isTrue(deliveries[0]?.signatureVerified);
+        assert.equal(
+          (yield* service.getWebhookDelivery({ id: task.id, deliveryId: deliveries[0]!.id }))
+            .delivery.renderedPrompt,
+          null,
+        );
+        const current = (yield* service.list()).tasks.find((item) => item.id === task.id);
+        assert.equal(current?.runCount, 0);
+      }),
+    ),
+);
+
+it.effect(
+  "rejects unsigned or bad-signature challenges without poisoning a signed webhook id",
+  () =>
+    withService(({ service, launches }) =>
+      Effect.gen(function* () {
+        const { task } = yield* service.upsert(yield* standardTaskInput());
+        const request = yield* standardRequest(task, "challenge-1", {
+          type: "verification",
+          challenge: "abc",
+        });
+        for (const headers of [{}, { ...request.headers, "webhook-signature": "v1,invalid" }]) {
+          assert.equal(
+            (yield* service.triggerWebhook({ ...request, headers }))._tag,
+            "rejected_signature",
+          );
+        }
+        assert.equal(yield* Queue.size(launches), 0);
+        assert.equal((yield* service.triggerWebhook(request))._tag, "verification");
+        assert.equal(
+          (yield* service.triggerWebhook({ ...request, headers: {} }))._tag,
+          "rejected_signature",
+        );
+        assert.equal(yield* Queue.size(launches), 0);
+      }),
+    ),
+);
+
+it.effect(
+  "renders a signed event and runs the same webhook-id once across direct and relay delivery",
+  () =>
+    withService(({ service, launches }) =>
+      Effect.gen(function* () {
+        const { task } = yield* service.upsert(yield* standardTaskInput());
+        const request = yield* standardRequest(task, "event-1");
+        const results = yield* Effect.all(
+          [
+            service.triggerWebhook(request),
+            service.triggerWebhook({ ...request, relayDeliveryId: "relay-1" }),
+            service.triggerWebhook({ ...request, relayDeliveryId: "relay-2" }),
+          ],
+          { concurrency: "unbounded" },
+        );
+        assert.deepEqual(
+          results.map((result) => result._tag),
+          ["accepted", "accepted", "accepted"],
+        );
+        const accepted = results.filter((result) => result._tag === "accepted");
+        assert.equal(new Set(accepted.map((result) => result.deliveryId)).size, 1);
+        assert.equal(accepted.filter((result) => result.outcome === "duplicate").length, 2);
+        const launch = yield* Queue.take(launches);
+        assert.equal(launch.initialMessage?.text, "message.created source-1");
+        assert.equal(yield* Queue.size(launches), 0);
+        assert.equal((yield* service.listWebhookDeliveries({ id: task.id })).deliveries.length, 1);
+      }),
+    ),
+);
+
+it.effect("uses Clock now to reject an old signed event without a run", () =>
+  withService(({ service, launches }) =>
+    Effect.gen(function* () {
+      const { task } = yield* service.upsert(yield* standardTaskInput());
+      const request = yield* standardRequest(task, "stale-event");
+      yield* TestClock.adjust("301 seconds");
+      assert.equal((yield* service.triggerWebhook(request))._tag, "rejected_signature");
+      assert.equal(yield* Queue.size(launches), 0);
+    }),
+  ),
+);
+
+it.effect("keeps signed webhook id claims after the 50-row delivery log is trimmed", () =>
+  withService(({ service, launches }) =>
+    Effect.gen(function* () {
+      const { task } = yield* service.upsert(yield* standardTaskInput());
+      const request = yield* standardRequest(task, "kept-standard-id");
+      const first = yield* service.triggerWebhook(request);
+      if (first._tag !== "accepted") assert.fail("Expected the first event to be accepted");
+      yield* Queue.take(launches);
+      for (let index = 0; index < 51; index++) {
+        assert.equal(
+          (yield* service.triggerWebhook(yield* standardRequest(task, `other-${index}`)))._tag,
+          "accepted",
+        );
+        yield* Queue.take(launches);
+      }
+      assert.equal((yield* service.listWebhookDeliveries({ id: task.id })).deliveries.length, 50);
+      assert.deepEqual(yield* service.triggerWebhook(request), { ...first, outcome: "duplicate" });
+      assert.equal(yield* Queue.size(launches), 0);
+    }),
+  ),
+);
+
+it.effect("scopes a signed webhook id to its task", () =>
+  withService(({ service, launches }) =>
+    Effect.gen(function* () {
+      const { task: first } = yield* service.upsert(yield* standardTaskInput());
+      const { task: second } = yield* service.upsert(
+        yield* standardTaskInput({ id: "scheduled-task:other" }),
+      );
+      for (const task of [first, second]) {
+        assert.equal(
+          (yield* service.triggerWebhook(yield* standardRequest(task, "shared-id")))._tag,
+          "accepted",
+        );
+        yield* Queue.take(launches);
+      }
+    }),
+  ),
+);
+
+it.effect("does not treat malformed or extended verification payloads as challenges", () =>
+  withService(({ service, launches }) =>
+    Effect.gen(function* () {
+      const { task } = yield* service.upsert(yield* standardTaskInput());
+      const payloads = [
+        { type: "verification", challenge: "a".repeat(129) },
+        { type: "verification", challenge: 1 },
+        { type: "verification", challenge: "abc", extra: true },
+        { type: "verification" },
+      ];
+      for (const [index, payload] of payloads.entries()) {
+        assert.equal(
+          (yield* service.triggerWebhook(
+            yield* standardRequest(task, `malformed-${index}`, payload),
+          ))._tag,
+          "accepted",
+        );
+        yield* Queue.take(launches);
+      }
+    }),
+  ),
+);
+
+it.effect("answers verification with a full run queue and leaves retryable event claims free", () =>
+  Effect.gen(function* () {
+    const gate = yield* Deferred.make<void>();
+    yield* withService(
+      ({ service, launches }) =>
+        Effect.gen(function* () {
+          const { task } = yield* service.upsert(yield* standardTaskInput());
+          yield* service.triggerWebhook(yield* standardRequest(task, "queue-0"));
+          yield* Queue.take(launches);
+          for (let index = 1; index < 20; index++) {
+            assert.equal(
+              (yield* service.triggerWebhook(yield* standardRequest(task, `queue-${index}`)))._tag,
+              "accepted",
+            );
+          }
+          const waiting = yield* standardRequest(task, "queue-retry");
+          assert.equal((yield* service.triggerWebhook(waiting))._tag, "rate_limited");
+          for (let index = 0; index < 2; index++) {
+            assert.equal(
+              (yield* service.triggerWebhook(
+                yield* standardRequest(task, `challenge-${index}`, {
+                  type: "verification",
+                  challenge: "a".repeat(128),
+                }),
+              ))._tag,
+              "verification",
+            );
+          }
+          yield* Deferred.succeed(gate, undefined);
+          for (let index = 1; index < 20; index++) yield* Queue.take(launches);
+          yield* Effect.yieldNow;
+          assert.equal((yield* service.triggerWebhook(waiting))._tag, "accepted");
+          yield* Queue.take(launches);
+        }),
+      { gate },
+    );
+  }),
+);
+
+it.effect(
+  "verifies challenges and events through both /api/hooks and the /v1/hooks relay using fixtures only",
+  () =>
+    withService(({ service, launches }) =>
+      Effect.gen(function* () {
+        const keys = NodeCrypto.generateKeyPairSync("ed25519", {
+          privateKeyEncoding: { format: "pem", type: "pkcs8" },
+          publicKeyEncoding: { format: "pem", type: "spki" },
+        });
+        const environmentId = EnvironmentId.make("env-standard-webhooks");
+        const relayIssuer = "https://relay.example.test";
+        const secrets = new Map([
+          [CLOUD_MINT_PUBLIC_KEY, keys.publicKey],
+          [RELAY_ISSUER_SECRET, relayIssuer],
+        ]);
+        const environment = HttpRouter.toHttpEffect(
+          HttpApiBuilder.layer(
+            HttpApi.make("environment").add(EnvironmentHttpApi.groups.webhooks),
+          ).pipe(
+            Layer.provide(WebhookRoute.layer),
+            Layer.provide(RelayDeliveryProof.layer),
+            Layer.provide(Layer.succeed(ScheduledTaskService.ScheduledTaskService, service)),
+            Layer.provide(
+              Layer.mock(ServerSecretStore.ServerSecretStore)({
+                get: (name) =>
+                  Effect.succeed(
+                    Option.map(Option.fromUndefinedOr(secrets.get(name)), (value) =>
+                      new TextEncoder().encode(value),
+                    ),
+                  ),
+              }),
+            ),
+            Layer.provide(
+              Layer.mock(ServerEnvironment.ServerEnvironment)({
+                getEnvironmentId: Effect.succeed(environmentId),
+              }),
+            ),
+            Layer.provide(
+              HttpPlatform.layer.pipe(
+                Layer.provideMerge(NodeServices.layer),
+                Layer.provideMerge(Etag.layerWeak),
+              ),
+            ),
+            Layer.provide(NodeServices.layer),
+          ),
+        );
+        const handler = yield* environment;
+        const sendEnvironment = (request: Request) =>
+          Effect.gen(function* () {
+            const sent = yield* Deferred.make<Response>();
+            yield* HttpEffect.toHandled(handler, (_request, response) =>
+              Deferred.succeed(sent, HttpServerResponse.toWeb(response)),
+            ).pipe(
+              Effect.provideService(
+                HttpServerRequest.HttpServerRequest,
+                HttpServerRequest.fromWeb(request),
+              ),
+            );
+            return yield* Deferred.await(sent);
+          });
+        const forwarding = HookForwarder.layer.pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              NodePlatformCrypto.layer,
+              Layer.mock(HeldHooks.HeldHooks)({
+                resolveEndpoint: () =>
+                  Effect.succeed({
+                    httpBaseUrl: "https://env.example.test/",
+                    environmentId,
+                    holdWhileOffline: false,
+                  }),
+              }),
+              Layer.mock(HookInbox.HookInbox)({}),
+              Layer.succeed(RelayConfiguration.RelayConfiguration, {
+                relayIssuer,
+                apns: null,
+                clerkSecretKey: Redacted.make("fixed-clerk-test-key"),
+                clerkPublishableKey: "pk_test_fixed",
+                clerkJwtAudience: "t3-code-relay",
+                apnsDeliveryJobSigningSecret: Redacted.make("fixed-apns-test-key"),
+                cloudMintPrivateKey: Redacted.make(keys.privateKey),
+                cloudMintPublicKey: keys.publicKey,
+                managedEndpointBaseDomain: "example.test",
+                managedEndpointNamespace: "dev",
+              }),
+              Layer.succeed(HookForwarder.HookRateLimiter, {
+                allowHook: () => Effect.succeed(true),
+                allowEndpoint: () => Effect.succeed(true),
+              }),
+              Layer.succeed(
+                HttpClient.HttpClient,
+                HttpClient.make((request) =>
+                  sendEnvironment(
+                    new Request(request.url, {
+                      method: request.method,
+                      headers: request.headers,
+                      ...(request.body._tag === "Uint8Array"
+                        ? { body: new Uint8Array(request.body.body) }
+                        : {}),
+                    }),
+                  ).pipe(Effect.map((response) => HttpClientResponse.fromWeb(request, response))),
+                ),
+              ),
+            ),
+          ),
+        );
+        const forwarder = yield* HookForwarder.HookForwarder.pipe(Effect.provide(forwarding));
+        const { task } = yield* service.upsert(yield* standardTaskInput());
+        const publicUrl = `https://relay.example.test/v1/hooks/0123456789abcdef/${task.webhook!.path.slice("/api/hooks/".length)}`;
+        const send = (request: ScheduledTaskService.WebhookTriggerRequest, relay: boolean) => {
+          const webRequest = new Request(
+            relay ? publicUrl : `https://env.example.test${task.webhook!.path}`,
+            {
+              method: "POST",
+              body: request.bodyText,
+              headers: request.headers,
+            },
+          );
+          return relay
+            ? forwarder
+                .handle(HttpServerRequest.fromWeb(webRequest))
+                .pipe(Effect.map((response) => HttpServerResponse.toWeb(response)))
+            : sendEnvironment(webRequest);
+        };
+        for (const relay of [false, true]) {
+          const request = yield* standardRequest(task, `http-challenge-${relay}`, {
+            type: "verification",
+            challenge: "challenge-echo",
+          });
+          const response = yield* send(request, relay);
+          assert.equal(response.status, 200);
+          assert.deepEqual(yield* Effect.promise(() => response.json()), {
+            challenge: "challenge-echo",
+          });
+          const unsigned = yield* send({ ...request, headers: {} }, relay);
+          assert.equal(unsigned.status, 401);
+          assert.equal(yield* Queue.size(launches), 0);
+        }
+        const event = yield* standardRequest(task, "http-event");
+        const response = yield* send(event, true);
+        assert.equal(response.status, 202);
+        const accepted = yield* Effect.promise(() => response.json());
+        assert.equal(
+          (yield* Queue.take(launches)).initialMessage?.text,
+          "message.created source-1",
+        );
+        const replay = yield* send(event, false);
+        assert.equal(replay.status, 202);
+        assert.deepEqual(yield* Effect.promise(() => replay.json()), accepted);
+        assert.equal(yield* Queue.size(launches), 0);
+      }).pipe(Effect.scoped),
+    ),
 );

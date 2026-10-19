@@ -53,6 +53,18 @@ describe("scheduleDraftForTask", () => {
     });
   });
 
+  it("preserves the Standard Webhooks scheme when saving an existing task", () => {
+    const signature = {
+      header: "ignored",
+      encoding: "hex",
+      prefix: "ignored",
+      scheme: "standard-webhooks",
+    } as const;
+    expect(
+      scheduleFromDraft(scheduleDraftForTask({ schedule: { type: "webhook", signature } })),
+    ).toEqual({ type: "webhook", signature, maxDeliveryAgeMinutes: null });
+  });
+
   it("keeps a webhook signature on save without sending a secret", () => {
     const signature = {
       header: "x-hub-signature-256",

@@ -1,3 +1,4 @@
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
 import {
@@ -57,21 +58,29 @@ const ScheduledTaskFixedTimeSchedule = Schema.Struct({
 });
 
 const ScheduledTaskWebhookSignatureFields = {
-  header: TrimmedNonEmptyString.annotate({
+  scheme: Schema.optional(Schema.Literals(["hmac-body", "standard-webhooks"])).annotate({
+    description:
+      "Signing protocol; defaults to hmac-body. standard-webhooks uses webhook-id, webhook-timestamp and webhook-signature with a whsec_ base64 secret, a 300-second clock window, and signed verification challenge replies. header, encoding and prefix are ignored for standard-webhooks.",
+  }),
+  header: TrimmedNonEmptyString.pipe(
+    Schema.withDecodingDefault(Effect.succeed("x-hub-signature-256")),
+  ).annotate({
     description: "Request header carrying the signature, such as x-hub-signature-256.",
   }),
-  encoding: Schema.Literals(["hex", "base64"]).annotate({
-    description: "How the HMAC-SHA256 digest is encoded in the header.",
-  }),
-  prefix: Schema.String.annotate({
+  encoding: Schema.Literals(["hex", "base64"])
+    .pipe(Schema.withDecodingDefault(Effect.succeed("hex" as const)))
+    .annotate({
+      description: "How the HMAC-SHA256 digest is encoded in the header.",
+    }),
+  prefix: Schema.String.pipe(Schema.withDecodingDefault(Effect.succeed("sha256="))).annotate({
     description: "Text before the digest in the header value, such as 'sha256='. Empty for none.",
   }),
 };
 
-/** HMAC-SHA256 over the raw request body. The secret is never part of the read model. */
+/** Selects the signing protocol. The secret is never part of the read model. */
 export const ScheduledTaskWebhookSignature = Schema.Struct(
   ScheduledTaskWebhookSignatureFields,
-).annotate({ description: "Optional HMAC-SHA256 signature check over the raw request body." });
+).annotate({ description: "Optional body HMAC or Standard Webhooks signature verification." });
 export type ScheduledTaskWebhookSignature = typeof ScheduledTaskWebhookSignature.Type;
 
 /** Matches how long the relay holds a request for an offline environment. */
@@ -255,6 +264,7 @@ export type ScheduledTaskWebhookDeliveryId = typeof ScheduledTaskWebhookDelivery
 
 export const ScheduledTaskWebhookDeliveryOutcome = Schema.Literals([
   "accepted",
+  "verification",
   "dispatch_failed",
   "rejected_signature",
   "disabled",

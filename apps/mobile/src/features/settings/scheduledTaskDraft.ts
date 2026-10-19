@@ -98,6 +98,7 @@ export function scheduleFromDraft(draft: ScheduleDraft): ScheduledTaskUpsertSche
         draft.signature === null
           ? null
           : {
+              ...(draft.signature.scheme === undefined ? {} : { scheme: draft.signature.scheme }),
               header: draft.signature.header,
               encoding: draft.signature.encoding,
               prefix: draft.signature.prefix,

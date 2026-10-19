@@ -114,6 +114,8 @@ export const layer = HttpApiBuilder.group(
           );
 
         switch (result._tag) {
+          case "verification":
+            return json(200, { challenge: result.challenge }, "verification");
           case "accepted":
             return json(202, { deliveryId: result.deliveryId }, result.outcome);
           case "not_found":

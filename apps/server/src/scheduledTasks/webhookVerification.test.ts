@@ -58,3 +58,119 @@ describe("verifyWebhookSignature", () => {
     );
   });
 });
+
+describe("Standard Webhooks signatures", () => {
+  const signature = {
+    scheme: "standard-webhooks",
+    header: "ignored",
+    encoding: "hex",
+    prefix: "ignored",
+  } as const;
+  const key = Buffer.from("fixed-test-signing-key");
+  const secret = `whsec_${key.toString("base64")}`;
+  const id = "msg_fixed";
+  const timestamp = "1792396800";
+  const nowMillis = Number(timestamp) * 1_000;
+  const body = new TextEncoder().encode('{"type":"message.created","data":{"text":"café"}}');
+  const expected = NodeCrypto.createHmac("sha256", key)
+    .update(`${id}.${timestamp}.`)
+    .update(body)
+    .digest("base64");
+  const headers = {
+    "webhook-id": id,
+    "webhook-timestamp": timestamp,
+    "webhook-signature": `v1,${expected}`,
+  };
+
+  it("accepts a known answer over id, timestamp and exact body bytes", () => {
+    assert.isTrue(verifyWebhookSignature({ signature, secret, headers, body, nowMillis }));
+  });
+
+  it("rejects a wrong secret and changes to any signed field", () => {
+    assert.isFalse(
+      verifyWebhookSignature({
+        signature,
+        secret: `whsec_${Buffer.from("wrong").toString("base64")}`,
+        headers,
+        body,
+        nowMillis,
+      }),
+    );
+    for (const changed of [
+      { ...headers, "webhook-id": "other" },
+      { ...headers, "webhook-timestamp": String(Number(timestamp) + 1) },
+    ]) {
+      assert.isFalse(
+        verifyWebhookSignature({ signature, secret, headers: changed, body, nowMillis }),
+      );
+    }
+    assert.isFalse(
+      verifyWebhookSignature({
+        signature,
+        secret,
+        headers,
+        body: new TextEncoder().encode("{}"),
+        nowMillis,
+      }),
+    );
+  });
+
+  it("bounds timestamps to 300 seconds in either direction", () => {
+    for (const offset of [-300_001, 300_001]) {
+      assert.isFalse(
+        verifyWebhookSignature({ signature, secret, headers, body, nowMillis: nowMillis + offset }),
+      );
+    }
+    for (const offset of [-300_000, 300_000]) {
+      assert.isTrue(
+        verifyWebhookSignature({ signature, secret, headers, body, nowMillis: nowMillis + offset }),
+      );
+    }
+  });
+
+  it("accepts a second v1 signature during secret rotation", () => {
+    assert.isTrue(
+      verifyWebhookSignature({
+        signature,
+        secret,
+        headers: { ...headers, "webhook-signature": `v1,invalid v2,ignored v1,${expected}` },
+        body,
+        nowMillis,
+      }),
+    );
+  });
+
+  it("rejects missing or malformed signing metadata and keys", () => {
+    for (const name of Object.keys(headers)) {
+      assert.isFalse(
+        verifyWebhookSignature({
+          signature,
+          secret,
+          headers: { ...headers, [name]: "" },
+          body,
+          nowMillis,
+        }),
+      );
+    }
+    for (const value of ["NaN", "Infinity", "1.5", "-1", "1792396800junk"]) {
+      assert.isFalse(
+        verifyWebhookSignature({
+          signature,
+          secret,
+          headers: { ...headers, "webhook-timestamp": value },
+          body,
+          nowMillis,
+        }),
+      );
+    }
+    for (const value of ["whsec_", "not-a-whsec-secret", "whsec_!!!"]) {
+      assert.isFalse(
+        verifyWebhookSignature({ signature, secret: value, headers, body, nowMillis }),
+      );
+    }
+    assert.isFalse(verifyWebhookSignature({ signature, secret, headers, body }));
+    assert.isFalse(
+      verifyWebhookSignature({ signature, secret, headers, body, nowMillis: Number.NaN }),
+    );
+  });
+});

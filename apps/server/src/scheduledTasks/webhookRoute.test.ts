@@ -144,6 +144,26 @@ describe("webhook route", () => {
     }
   });
 
+  it("answers a verified challenge with a 200 JSON echo", async () => {
+    const { handler, dispose } = handlerFor(() =>
+      Effect.succeed({
+        _tag: "verification",
+        deliveryId: ScheduledTaskWebhookDeliveryId.make("delivery:verification"),
+        challenge: "fixed-challenge",
+      }),
+    );
+    try {
+      const response = await handler(
+        post("/api/hooks/id/tok", '{"type":"verification","challenge":"fixed-challenge"}'),
+      );
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ challenge: "fixed-challenge" });
+      expect(response.headers.get("x-t3-hook-outcome")).toBe("verification");
+    } finally {
+      await dispose();
+    }
+  });
+
   // Live clock: the server checks proofs against real time.
   it.live("trusts the relay's delivery id and receive time only with its signed proof", () =>
     Effect.gen(function* () {
@@ -229,6 +249,7 @@ describe("webhook route", () => {
     const deliveryId = ScheduledTaskWebhookDeliveryId.make("delivery:1");
     const cases: ReadonlyArray<[WebhookTriggerResult, number, string]> = [
       [{ _tag: "accepted", deliveryId, outcome: "accepted" }, 202, "accepted"],
+      [{ _tag: "verification", deliveryId, challenge: "abc" }, 200, "verification"],
       // Same status as a started run; only the header tells them apart.
       [{ _tag: "accepted", deliveryId, outcome: "duplicate" }, 202, "duplicate"],
       [{ _tag: "accepted", deliveryId, outcome: "prompt_too_long" }, 202, "prompt_too_long"],
