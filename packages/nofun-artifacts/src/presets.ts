@@ -44,9 +44,12 @@ const frameCss = (selection: string, extra = "") =>
 // A1-4: Canvas boards ban blue. The `t3` theme points the No Fun tokens at the variables the reader's
 // T3 app injects, and T3's own primary, ring and focus are blue (#346bf1), as is the Status "info"
 // tone. A Canvas bundle must not inherit them: ink, gray rings and a gray info tone instead.
-// Specificity (0,1,1) beats the `:root` and `.dark` definitions in runtime.css and the host sheet.
+// The rules hang off `html.dark` (the marker compileLinked emits for dark t3 pages): the runtime's
+// `theme()` clears the body's theme attributes on every load, so a `body[data-*]` selector never
+// matches, while `<html>` is untouched. Specificity (0,1,2) beats the `:root` and `.dark`
+// definitions in runtime.css and the host sheet.
 export const NO_BLUE_T3_CSS =
-  `body[data-nf-theme="t3"]{--primary:var(--foreground);--primary-foreground:var(--background);` +
+  `html.dark body{--primary:var(--foreground);--primary-foreground:var(--background);` +
   `--ring:var(--muted-foreground);--nf-focus:var(--muted-foreground);--info:var(--muted-foreground)}`;
 
 export const PRESETS = {
@@ -80,7 +83,9 @@ export const PRESETS = {
     typeScale: TYPE_SCALE,
     css: frameCss(
       "color-mix(in oklab, var(--foreground) 24%, transparent)",
-      `body[data-nf-theme="t3"]{padding:16px}${NO_BLUE_T3_CSS}`,
+      // Bare `body`: this preset CSS ships only on canvas-t3 pages, and a `body[data-*]`
+      // selector would never match (the runtime's `theme()` clears those attributes on load).
+      `body{padding:16px}${NO_BLUE_T3_CSS}`,
     ),
   },
 } as const satisfies Record<string, CanvasPreset>;

@@ -243,6 +243,19 @@ async function userCss(dir: string, tsx: string, runtimeCss: string | undefined)
     .join("");
 }
 
+/**
+ * The `<html>` tag for a linked page. A dark t3 page must carry `.dark` itself: the t3 theme
+ * points its tokens at host-injected variables, but the opaque sandboxed entry frame never
+ * receives a host sheet or a `.dark` class, so dark tokens never engage and text renders
+ * near-black on dark. The marker goes on `<html>` because the runtime's `theme()` clears the
+ * body's classes and theme attributes on every load. Branded themes own their marker through
+ * `bodyFor` + `theme(brand, {scheme})` and are untouched.
+ */
+export function htmlTag(theme: string, scheme: "light" | "dark" | undefined): string {
+  if (theme === T3_THEME && scheme !== "light") return `<!doctype html><html lang="en" class="dark">`;
+  return `<!doctype html><html lang="en">`;
+}
+
 function bodyFor(dir: string, theme: string) {
   if (theme === T3_THEME) return ` data-nf-theme="${T3_THEME}"`;
   const { schemes } = brandScheme(dir, theme);
@@ -303,7 +316,7 @@ export async function compileLinked(input: LinkedCompileInput): Promise<LinkedAr
   const at = deterministicStampInstant(sourceBytes, input.runtimeSHA);
   const stamp = `components=${input.runtimeSHA};lane=${input.lane};theme=${theme}${size};at=${at};linked=${input.runtimeSHA}`;
   const html = [
-    `<!doctype html><html lang="en"><head>`,
+    `${htmlTag(theme, input.scheme)}<head>`,
     `<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">`,
     `<meta name="nofun-artifact" content="${escapeHtml(stamp)}">`,
     `<title>${escapeHtml(title)}</title>`,

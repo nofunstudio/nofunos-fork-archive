@@ -256,6 +256,10 @@ test(
       { encoding: "utf8", env: { ...process.env, NOFUN_UI_RUNTIME_ROOT: root } },
     );
     assert.equal(run.status, 0, run.stderr + run.stdout);
+    const entry = NodeFs.readFileSync(NodePath.join(out, "index.html"), "utf8");
+    // A17: a dark t3 page carries its own .dark marker on <html> (the opaque frame has no host).
+    assert.ok(entry.includes('<html lang="en" class="dark">'), entry.slice(0, 200));
+    assert.ok(entry.includes("body{padding:16px}"));
     const { meta, pieces, stampJson, manifest } = linkedPieces(out);
     assert.deepEqual(pieces, [`linked=${VERSION}`], meta);
     assert.equal(stampJson.linked, VERSION);
