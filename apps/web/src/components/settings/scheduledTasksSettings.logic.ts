@@ -74,6 +74,7 @@ export interface DraftState {
    */
   readonly baseModelSelection: ModelSelection | null;
   readonly signatureEnabled: boolean;
+  readonly signatureScheme: "hmac-body" | "standard-webhooks";
   readonly signatureHeader: string;
   readonly signatureEncoding: "hex" | "base64";
   readonly signaturePrefix: string;
@@ -85,6 +86,7 @@ export interface DraftState {
 
 /** GitHub's signature settings, the most common sender. */
 export const WEBHOOK_SIGNATURE_DEFAULTS = {
+  signatureScheme: "hmac-body",
   signatureHeader: "x-hub-signature-256",
   signatureEncoding: "hex",
   signaturePrefix: "sha256=",
@@ -100,7 +102,11 @@ export function scheduleFromDraft(draft: DraftState): ScheduledTaskUpsertSchedul
       type: "webhook",
       signature: draft.signatureEnabled
         ? {
-            header: draft.signatureHeader.trim(),
+            ...(draft.signatureScheme === "hmac-body" ? {} : { scheme: draft.signatureScheme }),
+            header:
+              draft.signatureScheme === "standard-webhooks"
+                ? draft.signatureHeader.trim() || WEBHOOK_SIGNATURE_DEFAULTS.signatureHeader
+                : draft.signatureHeader.trim(),
             encoding: draft.signatureEncoding,
             prefix: draft.signaturePrefix,
             ...(secret ? { secret } : {}),
@@ -157,6 +163,7 @@ export function taskToDraft(task: ScheduledTask): DraftState {
     ...(schedule.type === "webhook" && schedule.signature !== null
       ? {
           signatureEnabled: true,
+          signatureScheme: schedule.signature.scheme ?? "hmac-body",
           signatureHeader: schedule.signature.header,
           signatureEncoding: schedule.signature.encoding,
           signaturePrefix: schedule.signature.prefix,

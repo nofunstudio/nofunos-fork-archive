@@ -52,7 +52,11 @@ import {
   renderWebhookPrompt,
   type WebhookRequest,
 } from "./webhookTemplate.ts";
-import { constantTimeEquals, verifyWebhookSignature } from "./webhookVerification.ts";
+import {
+  constantTimeEquals,
+  decodeWebhookVerificationChallenge,
+  verifyWebhookSignature,
+} from "./webhookVerification.ts";
 
 /** Path prefix of the environment route that receives webhook requests. */
 export const WEBHOOK_ROUTE_PREFIX = "/api/hooks";
@@ -129,6 +133,7 @@ export interface WebhookTriggerRequest extends WebhookRequest {
  */
 export type WebhookDeliveryOutcome =
   | "accepted"
+  | "verification"
   | "duplicate"
   | "prompt_too_long"
   | "queue_full"
@@ -140,6 +145,11 @@ export type WebhookDeliveryOutcome =
   | "error";
 
 export type WebhookTriggerResult =
+  | {
+      readonly _tag: "verification";
+      readonly deliveryId: ScheduledTaskWebhookDeliveryId;
+      readonly challenge: string;
+    }
   | {
       readonly _tag: "accepted";
       readonly deliveryId: ScheduledTaskWebhookDeliveryId;
@@ -1029,6 +1039,9 @@ export const layer = Layer.effect(
                   input.schedule.signature == null
                     ? null
                     : {
+                        ...(input.schedule.signature.scheme === undefined
+                          ? {}
+                          : { scheme: input.schedule.signature.scheme }),
                         header: input.schedule.signature.header.toLowerCase(),
                         encoding: input.schedule.signature.encoding,
                         prefix: input.schedule.signature.prefix,
@@ -1455,7 +1468,9 @@ export const layer = Layer.effect(
               );
         const observe = (outcome: WebhookDeliveryOutcome) =>
           observeDelivery(request, outcome, receivedAt, now);
-        const deliveryId = ScheduledTaskWebhookDeliveryId.make(
+        const standardWebhooks = schedule.signature?.scheme === "standard-webhooks";
+        let claimId = standardWebhooks ? undefined : request.relayDeliveryId;
+        let deliveryId = ScheduledTaskWebhookDeliveryId.make(
           request.relayDeliveryId === undefined
             ? `delivery:${yield* crypto.randomUUIDv4.pipe(
                 Effect.mapError((cause) => taskError("Could not generate delivery id.", { cause })),
@@ -1468,11 +1483,11 @@ export const layer = Layer.effect(
         // A rate-limited delivery stays held on the relay, so it must give up
         // its claim or the next pass would treat it as already delivered.
         const releaseClaim = <A>(result: A) =>
-          request.relayDeliveryId === undefined
+          claimId === undefined
             ? Effect.succeed(result)
             : sql`
                 DELETE FROM scheduled_task_webhook_relay_deliveries
-                WHERE relay_delivery_id = ${request.relayDeliveryId}
+                WHERE relay_delivery_id = ${claimId}
               `.pipe(Effect.ignore, Effect.as(result));
         // From the claim until the run is forked nothing may interrupt: a
         // request dropped in between (the relay hangs up after its timeout)
@@ -1480,7 +1495,7 @@ export const layer = Layer.effect(
         // that is never released. Everything in here is local and quick.
         return yield* Effect.uninterruptible(
           Effect.gen(function* () {
-            if (request.relayDeliveryId !== undefined) {
+            if (!standardWebhooks && request.relayDeliveryId !== undefined) {
               const claimed = yield* sql<{ relay_delivery_id: string }>`
                 INSERT INTO scheduled_task_webhook_relay_deliveries
                   (relay_delivery_id, task_id, seen_at)
@@ -1549,12 +1564,74 @@ export const layer = Layer.effect(
                   secret: row.webhook_secret,
                   headers: request.headers,
                   body: request.body,
+                  nowMillis: DateTime.toEpochMillis(now),
                 });
               if (!verified) {
                 yield* log("rejected_signature");
                 yield* observe("rejected_signature");
                 return { _tag: "rejected_signature" as const };
               }
+            }
+            const verification = standardWebhooks
+              ? decodeWebhookVerificationChallenge(request.bodyText)
+              : Option.none<{ readonly challenge: string }>();
+            if (standardWebhooks) {
+              // Claim only authenticated ids. Namespace by task incarnation so
+              // another task's event id (or a relay id) cannot suppress this run.
+              // Reuse the durable 48-hour claim store; log retention is only 50.
+              const digest = yield* crypto
+                .digest(
+                  "SHA-256",
+                  new TextEncoder().encode(
+                    [task.id, task.createdAt, request.headers["webhook-id"] ?? ""]
+                      .map((part) => `${part.length}:${part}`)
+                      .join(""),
+                  ),
+                )
+                .pipe(
+                  Effect.mapError((cause) =>
+                    taskError("Could not generate delivery id.", { cause }),
+                  ),
+                );
+              const key = Buffer.from(digest).toString("hex");
+              claimId = `standard-webhooks:${key}`;
+              deliveryId = ScheduledTaskWebhookDeliveryId.make(`delivery:standard-webhooks:${key}`);
+              const claimed = yield* sql<{ relay_delivery_id: string }>`
+                INSERT INTO scheduled_task_webhook_relay_deliveries
+                  (relay_delivery_id, task_id, seen_at)
+                VALUES (${claimId}, ${task.id}, ${iso(now)})
+                ON CONFLICT (relay_delivery_id) DO NOTHING
+                RETURNING relay_delivery_id
+              `.pipe(
+                Effect.mapError((cause) =>
+                  taskError("Could not record webhook delivery.", { taskId: task.id, cause }),
+                ),
+              );
+              if (claimed.length === 0) {
+                if (Option.isSome(verification)) {
+                  yield* observe("verification");
+                  return {
+                    _tag: "verification" as const,
+                    deliveryId,
+                    challenge: verification.value.challenge,
+                  };
+                }
+                yield* observe("duplicate");
+                return { _tag: "accepted" as const, deliveryId, outcome: "duplicate" as const };
+              }
+              yield* sql`
+                DELETE FROM scheduled_task_webhook_relay_deliveries
+                WHERE seen_at < ${iso(DateTime.subtract(now, { hours: 48 }))}
+              `.pipe(Effect.ignore);
+            }
+            if (Option.isSome(verification)) {
+              yield* log("verification", { signatureVerified: true });
+              yield* observe("verification");
+              return {
+                _tag: "verification" as const,
+                deliveryId,
+                challenge: verification.value.challenge,
+              };
             }
             const maxAgeMinutes = schedule.maxDeliveryAgeMinutes ?? null;
             if (

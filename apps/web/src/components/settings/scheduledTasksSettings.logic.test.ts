@@ -177,6 +177,29 @@ describe("webhook scheduled tasks", () => {
     webhook: { path: "/api/hooks/legacy-task/token", url: null, hasSecret: true },
   };
 
+  it("round-trips Standard Webhooks without resending its secret", () => {
+    const signature = {
+      header: "ignored",
+      encoding: "hex",
+      prefix: "ignored",
+      scheme: "standard-webhooks",
+    } as const;
+    const draft = taskToDraft({ ...webhookTask, schedule: { type: "webhook", signature } });
+    expect(draft.signatureScheme).toBe("standard-webhooks");
+    expect(scheduleFromDraft(draft)).toEqual({
+      type: "webhook",
+      signature,
+      maxDeliveryAgeMinutes: null,
+    });
+  });
+
+  it("ignores an empty legacy header when switching to Standard Webhooks", () => {
+    const draft = taskToDraft(webhookTask);
+    expect(
+      scheduleFromDraft({ ...draft, signatureScheme: "standard-webhooks", signatureHeader: "" }),
+    ).toMatchObject({ signature: { scheme: "standard-webhooks", header: "x-hub-signature-256" } });
+  });
+
   it("keeps a stored secret when the secret field is left blank", () => {
     const draft = taskToDraft(webhookTask);
     expect(draft.scheduleMode).toBe("webhook");

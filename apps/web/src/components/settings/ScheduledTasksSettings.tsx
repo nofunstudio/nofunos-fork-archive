@@ -211,6 +211,7 @@ export function relativeLabel(value: string | null): string {
 
 const DELIVERY_OUTCOME_LABELS: Record<ScheduledTaskWebhookDeliveryOutcome, string> = {
   accepted: "Ran",
+  verification: "Verified",
   dispatch_failed: "Run failed",
   rejected_signature: "Bad signature",
   disabled: "Task paused",
@@ -219,7 +220,7 @@ const DELIVERY_OUTCOME_LABELS: Record<ScheduledTaskWebhookDeliveryOutcome, strin
 };
 
 function deliveryOutcomeVariant(outcome: ScheduledTaskWebhookDeliveryOutcome) {
-  if (outcome === "accepted") return "success";
+  if (outcome === "accepted" || outcome === "verification") return "success";
   if (outcome === "disabled" || outcome === "rate_limited" || outcome === "expired") {
     return "warning";
   }
@@ -868,7 +869,7 @@ function ScheduledTaskEditorDialog({
     if (
       schedule.type === "webhook" &&
       schedule.signature &&
-      (!schedule.signature.header ||
+      ((draft.signatureScheme === "hmac-body" && !schedule.signature.header) ||
         (!schedule.signature.secret &&
           !(liveTask?.schedule.type === "webhook" && liveTask.webhook?.hasSecret)))
     ) {
@@ -1186,7 +1187,7 @@ function ScheduledTaskEditorDialog({
                     <div className="min-w-0 space-y-1">
                       <Label htmlFor="scheduled-task-signature">Require signature</Label>
                       <p className="text-sm text-muted-foreground">
-                        Reject requests without a valid HMAC-SHA256 signature of the body.
+                        Reject requests without a valid signature.
                       </p>
                     </div>
                     <Switch
@@ -1199,50 +1200,83 @@ function ScheduledTaskEditorDialog({
                   </div>
                   {draft.signatureEnabled ? (
                     <div className="grid gap-3 sm:grid-cols-2">
-                      <Field label="Header" htmlFor="scheduled-task-signature-header">
-                        <Input
-                          id="scheduled-task-signature-header"
-                          value={draft.signatureHeader}
-                          onChange={(event) =>
-                            setDraft((current) => ({
-                              ...current,
-                              signatureHeader: event.target.value,
-                            }))
-                          }
-                        />
-                      </Field>
-                      <Field label="Prefix" htmlFor="scheduled-task-signature-prefix">
-                        <Input
-                          id="scheduled-task-signature-prefix"
-                          value={draft.signaturePrefix}
-                          placeholder="None"
-                          onChange={(event) =>
-                            setDraft((current) => ({
-                              ...current,
-                              signaturePrefix: event.target.value,
-                            }))
-                          }
-                        />
-                      </Field>
-                      <Field label="Encoding" htmlFor="scheduled-task-signature-encoding">
+                      <Field label="Signing scheme" htmlFor="scheduled-task-signature-scheme">
                         <Select
-                          value={draft.signatureEncoding}
+                          value={draft.signatureScheme}
                           onValueChange={(value) =>
                             setDraft((current) => ({
                               ...current,
-                              signatureEncoding: value === "base64" ? "base64" : "hex",
+                              signatureScheme:
+                                value === "standard-webhooks" ? "standard-webhooks" : "hmac-body",
                             }))
                           }
                         >
-                          <SelectTrigger size="sm" id="scheduled-task-signature-encoding">
-                            <SelectValue>{draft.signatureEncoding}</SelectValue>
+                          <SelectTrigger size="sm" id="scheduled-task-signature-scheme">
+                            <SelectValue>
+                              {draft.signatureScheme === "standard-webhooks"
+                                ? "Standard Webhooks"
+                                : "Body HMAC"}
+                            </SelectValue>
                           </SelectTrigger>
                           <SelectPopup>
-                            <SelectItem value="hex">hex</SelectItem>
-                            <SelectItem value="base64">base64</SelectItem>
+                            <SelectItem value="hmac-body">Body HMAC</SelectItem>
+                            <SelectItem value="standard-webhooks">Standard Webhooks</SelectItem>
                           </SelectPopup>
                         </Select>
                       </Field>
+                      {draft.signatureScheme === "hmac-body" ? (
+                        <>
+                          <Field label="Header" htmlFor="scheduled-task-signature-header">
+                            <Input
+                              id="scheduled-task-signature-header"
+                              value={draft.signatureHeader}
+                              onChange={(event) =>
+                                setDraft((current) => ({
+                                  ...current,
+                                  signatureHeader: event.target.value,
+                                }))
+                              }
+                            />
+                          </Field>
+                          <Field label="Prefix" htmlFor="scheduled-task-signature-prefix">
+                            <Input
+                              id="scheduled-task-signature-prefix"
+                              value={draft.signaturePrefix}
+                              placeholder="None"
+                              onChange={(event) =>
+                                setDraft((current) => ({
+                                  ...current,
+                                  signaturePrefix: event.target.value,
+                                }))
+                              }
+                            />
+                          </Field>
+                          <Field label="Encoding" htmlFor="scheduled-task-signature-encoding">
+                            <Select
+                              value={draft.signatureEncoding}
+                              onValueChange={(value) =>
+                                setDraft((current) => ({
+                                  ...current,
+                                  signatureEncoding: value === "base64" ? "base64" : "hex",
+                                }))
+                              }
+                            >
+                              <SelectTrigger size="sm" id="scheduled-task-signature-encoding">
+                                <SelectValue>{draft.signatureEncoding}</SelectValue>
+                              </SelectTrigger>
+                              <SelectPopup>
+                                <SelectItem value="hex">hex</SelectItem>
+                                <SelectItem value="base64">base64</SelectItem>
+                              </SelectPopup>
+                            </Select>
+                          </Field>
+                        </>
+                      ) : (
+                        <p className="text-sm text-muted-foreground">
+                          Uses the webhook-id, webhook-timestamp and webhook-signature headers.
+                          Enter the whsec_ signing secret.
+                        </p>
+                      )}
                       <Field label="Secret" htmlFor="scheduled-task-signature-secret">
                         <Input
                           id="scheduled-task-signature-secret"
