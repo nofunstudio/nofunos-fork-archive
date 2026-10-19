@@ -201,8 +201,9 @@ export function writeCanvasBundle(input: CanvasBundleInput): CanvasManifest {
     at,
   };
   if (input.linked) stampFile.linked = input.linked;
-  const runtime = input.runtime ? assertRuntimePin(input.runtime) : undefined;
-  if (runtime && input.linked && input.linked.toLowerCase() !== runtime.version) {
+  // Only absence is "unpinned": an explicit null/undefined/falsy `runtime` is refused, not dropped.
+  const runtime = Object.hasOwn(input, "runtime") ? assertRuntimePin(input.runtime) : undefined;
+  if (runtime && input.linked !== undefined && input.linked.toLowerCase() !== runtime.version) {
     throw new Error(
       `runtime pin ${runtime.version} disagrees with the linked runtime ${input.linked}.`,
     );

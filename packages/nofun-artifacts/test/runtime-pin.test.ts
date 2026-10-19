@@ -117,6 +117,60 @@ test("a malformed pin never reaches the manifest", () => {
   );
 });
 
+const GOOD = { version: VERSION, sha256: "a".repeat(64) };
+
+test("assertRuntimePin is strict: exact keys, string types, no coercion", () => {
+  assert.deepEqual(assertRuntimePin(GOOD), GOOD);
+  const bad: unknown[] = [
+    null,
+    undefined,
+    "580e64f46a50",
+    12345678,
+    [],
+    [GOOD.version, GOOD.sha256],
+    {},
+    { version: VERSION },
+    { sha256: GOOD.sha256 },
+    { ...GOOD, extra: 1 },
+    { ...GOOD, extra: undefined },
+    { version: 12345678, sha256: GOOD.sha256 },
+    { version: 0, sha256: GOOD.sha256 },
+    { version: "", sha256: GOOD.sha256 },
+    { version: null, sha256: GOOD.sha256 },
+    { version: ["580e64f46a50"], sha256: GOOD.sha256 },
+    { version: new String(VERSION), sha256: GOOD.sha256 },
+    { version: VERSION, sha256: null },
+    { version: VERSION, sha256: 0 },
+    { version: VERSION, sha256: "" },
+    { version: VERSION, sha256: GOOD.sha256.toUpperCase() },
+    { version: VERSION.toUpperCase(), sha256: GOOD.sha256 },
+    Object.assign(Object.create({ inherited: 1 }), GOOD),
+    new Map([["version", VERSION]]),
+  ];
+  for (const value of bad) {
+    assert.throws(() => assertRuntimePin(value), /runtime/, JSON.stringify(value) ?? String(value));
+  }
+});
+
+test("only the absence of runtime is unpinned: explicit null, undefined and falsy values are refused", () => {
+  for (const value of [null, undefined, 0, "", false, NaN, {}]) {
+    assert.throws(
+      () => bundle({ runtime: value as never }),
+      /runtime/,
+      `runtime: ${String(value)}`,
+    );
+  }
+  const { written } = bundle();
+  assert.equal("runtime" in written, false);
+});
+
+test("a numeric version never reaches a manifest", () => {
+  assert.throws(
+    () => bundle({ runtime: { version: 12345678, sha256: "a".repeat(64) } as never }),
+    /version must be a string/,
+  );
+});
+
 test("canvas-t3 preset neutralises T3's blue primary, ring, focus and info tone", () => {
   assert.ok(PRESETS["canvas-t3"].css.includes(NO_BLUE_T3_CSS));
   for (const name of ["--primary", "--ring", "--nf-focus", "--info"]) {

@@ -17,14 +17,30 @@ export interface RuntimePin {
 const VERSION = /^[0-9a-f]{8,64}$/;
 const DIGEST = /^[0-9a-f]{64}$/;
 
-export function assertRuntimePin(pin: RuntimePin): RuntimePin {
-  if (!VERSION.test(pin.version)) {
-    throw new Error(`runtime version must be 8...64 lowercase hex (got ${JSON.stringify(pin.version)}).`);
+/**
+ * Strict: a plain object with exactly the own keys `version` and `sha256`, both strings in the
+ * contract shape. Numbers, null, arrays, extra keys and empty values are refused, never coerced.
+ * Only the ABSENCE of a pin means "unpinned"; callers must not pass a falsy placeholder.
+ */
+export function assertRuntimePin(value: unknown): RuntimePin {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`runtime pin must be an object {version, sha256} (got ${JSON.stringify(value) ?? "undefined"}).`);
   }
-  if (!DIGEST.test(pin.sha256)) {
-    throw new Error(`runtime sha256 must be 64 lowercase hex (got ${JSON.stringify(pin.sha256)}).`);
+  if (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null) {
+    throw new Error("runtime pin must be a plain object.");
   }
-  return { version: pin.version, sha256: pin.sha256 };
+  const keys = Object.keys(value).sort();
+  if (keys.length !== 2 || keys[0] !== "sha256" || keys[1] !== "version") {
+    throw new Error(`runtime pin keys must be exactly version and sha256 (got ${JSON.stringify(keys)}).`);
+  }
+  const { version, sha256 } = value as Record<string, unknown>;
+  if (typeof version !== "string" || !VERSION.test(version)) {
+    throw new Error(`runtime version must be a string of 8...64 lowercase hex (got ${JSON.stringify(version)}).`);
+  }
+  if (typeof sha256 !== "string" || !DIGEST.test(sha256)) {
+    throw new Error(`runtime sha256 must be a string of 64 lowercase hex (got ${JSON.stringify(sha256)}).`);
+  }
+  return { version, sha256 };
 }
 
 const sha256Hex = (bytes: Buffer | string) => createHash("sha256").update(bytes).digest("hex");
@@ -53,6 +69,7 @@ export function runtimeRoot(): string {
 
 /** The pin for `version`, read from its runtime folder. Throws when the folder is not there. */
 export function readRuntimePin(version: string, root = runtimeRoot()): RuntimePin {
+  if (typeof version !== "string") throw new Error("runtime version must be a string.");
   const lowered = version.toLowerCase();
   if (!VERSION.test(lowered)) throw new Error(`runtime version ${JSON.stringify(version)} is not lowercase hex.`);
   const dir = NodePath.join(root, lowered);
