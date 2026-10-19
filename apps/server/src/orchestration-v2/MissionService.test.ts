@@ -218,6 +218,58 @@ it.effect("reopens file-backed state and recovers the same durable command recei
   ).pipe(Effect.provide(NodeServices.layer)),
 );
 
+it.effect("keeps company and host observations off the persisted mission and out of scope", () =>
+  Effect.gen(function* () {
+    const service = yield* MissionService.MissionService;
+    const committed = yield* service.execute(create());
+    assert.strictEqual(committed.committed, true);
+    const loaded = yield* service.get(fixture().id);
+    assert.strictEqual(Option.isSome(loaded), true);
+    if (Option.isNone(loaded)) return;
+    assert.strictEqual(loaded.value.teamId, scope.teamId);
+    assert.strictEqual(loaded.value.authorityEnvironmentId, scope.environmentId);
+    const sql = yield* SqlClient.SqlClient;
+    const rows = yield* sql<{
+      snapshot_json: string;
+    }>`SELECT snapshot_json FROM projection_missions`;
+    const snapshot = rows[0]?.snapshot_json ?? "";
+    assert.strictEqual(snapshot.includes("host-1"), false);
+    assert.strictEqual(snapshot.includes("boot-1"), false);
+    assert.strictEqual(snapshot.includes("No Fun"), false);
+  }).pipe(
+    Effect.provide(
+      MissionService.layer.pipe(
+        Layer.provide(EventStore.layer),
+        Layer.provide(Receipts.layer),
+        Layer.provide(
+          Layer.succeed(MissionService.MissionAuthority, {
+            ...scope,
+            company: "No Fun",
+            hostQualification: {
+              hostId: "host-1",
+              bootId: "boot-1",
+              buildObserved: true,
+              buildOk: true,
+              toolchainObserved: true,
+              toolchainOk: true,
+              observedAtMs: 1,
+            },
+            repositoryObservations: [
+              {
+                projectId: "test-project",
+                workspaceRootRealpath: "/tmp/source",
+                observedAncestry: ["base"],
+                observedAtMs: 1,
+              },
+            ],
+          }),
+        ),
+        Layer.provideMerge(Sqlite.layerMemory),
+      ),
+    ),
+  ),
+);
+
 it.effect("cancellation during receipt reservation rolls back the single owning transaction", () =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;

@@ -10,6 +10,7 @@ import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import {
+  buildServerProvider,
   isCommandMissingCause,
   parseGenericCliVersion,
   providerModelsFromSettings,
@@ -33,6 +34,26 @@ const OPENCODE_CUSTOM_MODEL_CAPABILITIES: ModelCapabilities = createModelCapabil
       currentValue: "build",
     },
   ],
+});
+
+describe("buildServerProvider", () => {
+  it("does not invent an admission attestation from an authenticated probe", () => {
+    const snapshot = buildServerProvider({
+      presentation: { displayName: "Codex" },
+      enabled: true,
+      checkedAt: "2026-10-19T00:00:00.000Z",
+      models: [],
+      probe: {
+        installed: true,
+        version: "1.0.0",
+        status: "ready",
+        auth: { status: "authenticated", email: "person@example.com" },
+      },
+    });
+
+    expect(snapshot.auth).toEqual({ status: "authenticated", email: "person@example.com" });
+    expect(snapshot).not.toHaveProperty("admissionAttestation");
+  });
 });
 
 describe("providerModelsFromSettings", () => {

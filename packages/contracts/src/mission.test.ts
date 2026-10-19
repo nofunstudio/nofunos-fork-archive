@@ -1,7 +1,13 @@
 import { describe, expect, it } from "@effect/vitest";
 import * as Schema from "effect/Schema";
 
-import { Mission, MissionCommand, MissionEvent } from "./mission.ts";
+import {
+  Mission,
+  MissionCommand,
+  MissionEvent,
+  dependencyReceiptHashesFromAcceptedResults,
+} from "./mission.ts";
+import { MissionResultRecord } from "./missionResult.ts";
 import {
   MAX_MISSION_EXECUTION_ADMISSIONS,
   MAX_MISSION_EXECUTION_RESULTS,
@@ -39,6 +45,9 @@ const encodeMission = Schema.encodeSync(Mission);
 const decodeExecution = Schema.decodeUnknownSync(MissionExecution);
 const decodeReceipt = Schema.decodeUnknownSync(MissionRetroReportReceipt);
 const decodeMission = Schema.decodeUnknownSync(Mission);
+const encodeMissionJson = Schema.encodeSync(Schema.fromJsonString(Mission));
+const decodeMissionJson = Schema.decodeUnknownSync(Schema.fromJsonString(Mission));
+const decodeResult = Schema.decodeUnknownSync(MissionResultRecord);
 
 const decodeRetroCheckpoint = Schema.decodeUnknownSync(MissionRetroCheckpoint);
 const decodeSkillEvaluation = Schema.decodeUnknownSync(MissionRetroSkillEvaluation);
@@ -108,6 +117,92 @@ const missionFixture = () => ({
   updatedAt: OCCURRED_AT,
 });
 
+const resultRecord = (patch: Record<string, unknown> = {}) =>
+  decodeResult({
+    taskId: "task-a",
+    attemptNumber: 1,
+    state: "produced",
+    outcome: "completed",
+    digests: {
+      inputDigest: "proposal-spec-hash",
+      dependencyDigest: "proposal-dependency-hash",
+      acceptanceDigest: "proposal-acceptance-hash",
+    },
+    provenance: {
+      childTaskId: "child",
+      childThreadId: "thread",
+      childRunId: "run",
+      commitSet: ["commit-1"],
+      requiredAncestry: ["base"],
+      ancestry: ["base"],
+      source: "server",
+      sourceRef: "ref",
+      resultRevision: 1,
+    },
+    summaryText: "done",
+    cancellationRequested: false,
+    pendingChildRuns: false,
+    mailboxAcked: true,
+    quarantined: [],
+    ...patch,
+  });
+
+const acceptanceReceipt = {
+  kind: "acceptance",
+  revision: 4,
+  commitSet: ["commit-1"],
+  evidenceKind: "test_report",
+  evidenceRef: "evidence-accepted",
+  decidedBy: "delivery",
+  decidedAt: OCCURRED_AT,
+} as const;
+
+describe("dependency receipt hashes", () => {
+  it("derives hashes from canonical acceptance receipts, not proposal digests", () => {
+    const accepted = resultRecord({ state: "accepted", acceptanceReceipt });
+    const hashes = dependencyReceiptHashesFromAcceptedResults([
+      resultRecord(),
+      resultRecord({
+        taskId: "task-reviewed",
+        state: "reviewed",
+        acceptanceReceipt,
+      }),
+      accepted,
+      resultRecord({
+        taskId: "task-integrated",
+        state: "integrated",
+        acceptanceReceipt,
+        integrationReceipt: { ...acceptanceReceipt, kind: "integration", evidenceRef: "merge-1" },
+      }),
+    ]);
+
+    expect(hashes.map((entry) => entry.taskId)).toEqual(["task-a", "task-integrated"]);
+    expect(hashes[0]?.hash).toBe(hashes.find((entry) => entry.taskId === "task-integrated")?.hash);
+    expect(hashes[0]?.hash).not.toContain("proposal-");
+    expect(hashes[0]?.hash).toContain("evidence-accepted");
+    expect(hashes[0]?.hash).not.toContain("merge-1");
+  });
+
+  it("omits a task whose accepted results disagree or lack an acceptance receipt", () => {
+    expect(
+      dependencyReceiptHashesFromAcceptedResults([
+        resultRecord({ state: "accepted" }),
+        resultRecord({
+          taskId: "task-b",
+          state: "accepted",
+          acceptanceReceipt: { ...acceptanceReceipt, kind: "review" },
+        }),
+        resultRecord({ taskId: "task-c", state: "accepted", acceptanceReceipt }),
+        resultRecord({
+          taskId: "task-c",
+          state: "accepted",
+          acceptanceReceipt: { ...acceptanceReceipt, evidenceRef: "other-evidence" },
+        }),
+      ]),
+    ).toEqual([]);
+  });
+});
+
 describe("mission wire schemas", () => {
   it("round-trips a multi-repository mission", () => {
     const decoded = decodeMission(missionFixture());
@@ -164,6 +259,80 @@ describe("mission wire schemas", () => {
   it("decodes an omitted execution as backwards compatible", () => {
     const decoded = decodeMission(missionFixture());
     expect(decoded.execution).toBeUndefined();
+  });
+
+  it("keeps admission scopes absent on a legacy mission snapshot", () => {
+    const decoded = decodeMissionJson(JSON.stringify(missionFixture()));
+    const task = decoded.tasks[0]!;
+    expect(task.writerScope).toBeUndefined();
+    expect(task.sharedManifestScopes).toBeUndefined();
+    expect(task.guiScopes).toBeUndefined();
+    expect(task.taskNecessary).toBeUndefined();
+    const persisted = JSON.parse(encodeMissionJson(decoded)) as {
+      tasks: Array<Record<string, unknown>>;
+    };
+    expect(persisted.tasks[0]).not.toHaveProperty("writerScope");
+    expect(persisted.tasks[0]).not.toHaveProperty("sharedManifestScopes");
+    expect(persisted.tasks[0]).not.toHaveProperty("guiScopes");
+    expect(persisted.tasks[0]).not.toHaveProperty("taskNecessary");
+  });
+
+  it("round-trips canonical task scopes and necessity", () => {
+    const mission = missionFixture();
+    const task = mission.tasks[0]!;
+    const scoped = {
+      ...mission,
+      tasks: [
+        {
+          ...task,
+          writerScope: "/workspace/project/src/admission",
+          sharedManifestScopes: ["/workspace/project/package.json"],
+          guiScopes: [],
+          taskNecessary: true,
+        },
+        mission.tasks[1],
+      ],
+    };
+    const decoded = decodeMissionJson(JSON.stringify(scoped));
+    expect(decoded.tasks[0]).toMatchObject({
+      writerScope: "/workspace/project/src/admission",
+      sharedManifestScopes: ["/workspace/project/package.json"],
+      guiScopes: [],
+      taskNecessary: true,
+    });
+    expect(decodeMissionJson(encodeMissionJson(decoded)).tasks[0]).toMatchObject({
+      writerScope: "/workspace/project/src/admission",
+      sharedManifestScopes: ["/workspace/project/package.json"],
+      guiScopes: [],
+      taskNecessary: true,
+    });
+  });
+
+  it("rejects a task scope that is not a normalized absolute path", () => {
+    const withScope = (writerScope: string) => ({
+      ...missionFixture(),
+      tasks: [{ ...missionFixture().tasks[0], writerScope }],
+    });
+    for (const writerScope of [
+      "src/admission",
+      "/tmp/../etc",
+      "/tmp/foo/",
+      "/tmp//foo",
+      "C:\\tmp",
+    ]) {
+      expect(() => decodeMission(withScope(writerScope))).toThrow();
+    }
+    expect(() =>
+      decodeMission({
+        ...missionFixture(),
+        tasks: [
+          {
+            ...missionFixture().tasks[0],
+            sharedManifestScopes: ["../package.json"],
+          },
+        ],
+      }),
+    ).toThrow();
   });
 
   it("round-trips bounded execution state", () => {

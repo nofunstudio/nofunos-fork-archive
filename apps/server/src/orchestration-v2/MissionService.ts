@@ -117,13 +117,47 @@ const guards = new WeakMap<
   }
 >();
 
-/** The authenticated runtime supplies this scope; request payloads cannot replace it. */
+/**
+ * Trusted host observation supplied with mission authority.
+ * Absent means the host was not qualified.
+ */
+export interface MissionHostQualification {
+  readonly hostId: string;
+  readonly bootId: string;
+  readonly buildObserved: boolean;
+  readonly buildOk: boolean;
+  readonly toolchainObserved: boolean;
+  readonly toolchainOk: boolean;
+  readonly observedAtMs: number;
+}
+
+/**
+ * Trusted repository observation for one bound project.
+ * Absent from the authority means that project was not observed.
+ */
+export interface MissionRepositoryObservation {
+  readonly projectId: string;
+  readonly workspaceRootRealpath: string;
+  readonly observedAncestry: ReadonlyArray<string>;
+  readonly observedAtMs: number;
+}
+
+/**
+ * The authenticated runtime supplies this scope; request payloads cannot replace it.
+ * `teamId`, `environmentId`, and `controllerThreadId` remain the scope checked
+ * by the service and the transaction guard. Delivery thread and epoch stay on
+ * the canonical mission. Company, host, and repository observations are
+ * optional trusted facts: omitted means unavailable.
+ */
 export class MissionAuthority extends Context.Service<
   MissionAuthority,
   {
     readonly teamId: TeamId;
     readonly environmentId: EnvironmentId;
     readonly controllerThreadId: ThreadId;
+    readonly company?: string | undefined;
+    readonly hostQualification?: MissionHostQualification | undefined;
+    readonly repositoryObservations?: ReadonlyArray<MissionRepositoryObservation> | undefined;
     readonly transactionGuard?: MissionTransactionGuard | undefined;
     readonly requestKey?: object | undefined;
   }

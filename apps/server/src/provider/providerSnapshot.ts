@@ -246,6 +246,9 @@ export function buildServerProvider(input: {
     skills: [...(input.skills ?? [])],
     ...(input.probe.usageLimits ? { usageLimits: input.probe.usageLimits } : {}),
     ...(versionAdvisory ? { versionAdvisory } : {}),
+    // Probes report auth status, not an account id, company, billing mode,
+    // route capability, or verification time. Leave admissionAttestation
+    // absent so admission denies instead of inventing those facts.
   };
 }
 

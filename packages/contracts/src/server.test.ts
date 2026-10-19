@@ -13,6 +13,7 @@ import {
 import { ServerSettings } from "./settings.ts";
 
 const decodeServerProvider = Schema.decodeUnknownSync(ServerProvider);
+const encodeServerProviderJson = Schema.encodeSync(Schema.fromJsonString(ServerProvider));
 const decodeServerProviders = Schema.decodeUnknownSync(ServerProviders);
 const decodeServerObservability = Schema.decodeUnknownSync(ServerObservability);
 const decodeUpsertKeybindingResult = Schema.decodeUnknownSync(ServerUpsertKeybindingResult);
@@ -136,6 +137,84 @@ describe("ServerProvider", () => {
     });
 
     expect(parsed.models[0]?.isLegacy).toBe(true);
+  });
+
+  it("leaves admission attestation absent on a legacy provider snapshot", () => {
+    const parsed = decodeServerProvider(baseProviderSnapshot);
+    expect(parsed.admissionAttestation).toBeUndefined();
+    expect(JSON.parse(encodeServerProviderJson(parsed))).not.toHaveProperty("admissionAttestation");
+  });
+
+  it("round-trips an admission attestation tied to the provider instance", () => {
+    const admissionAttestation = {
+      accountId: "acct-1",
+      company: "No Fun",
+      billingMode: "subscription",
+      verifiedAtMs: 1_760_400_000_000,
+      routes: [
+        {
+          modelId: "gpt-6.1-sol",
+          profile: "default",
+          capability: "writer",
+          supportedModelIds: ["gpt-6.1-sol"],
+        },
+      ],
+    };
+    const parsed = decodeServerProvider({
+      ...baseProviderSnapshot,
+      instanceId: "codex_personal",
+      admissionAttestation,
+    });
+    expect(parsed.instanceId).toBe("codex_personal");
+    expect(parsed.admissionAttestation).toEqual(admissionAttestation);
+    expect(
+      decodeServerProvider(JSON.parse(encodeServerProviderJson(parsed))).admissionAttestation,
+    ).toEqual(admissionAttestation);
+  });
+
+  it("rejects a partial or non-finite admission attestation", () => {
+    expect(() =>
+      decodeServerProvider({
+        ...baseProviderSnapshot,
+        admissionAttestation: {
+          accountId: "acct-1",
+          billingMode: "subscription",
+          verifiedAtMs: 1,
+          routes: [],
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      decodeServerProvider({
+        ...baseProviderSnapshot,
+        admissionAttestation: {
+          accountId: "acct-1",
+          company: "No Fun",
+          billingMode: "subscription",
+          verifiedAtMs: Number.NaN,
+          routes: [],
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      decodeServerProvider({
+        ...baseProviderSnapshot,
+        admissionAttestation: {
+          accountId: "acct-1",
+          company: "No Fun",
+          billingMode: "subscription",
+          verifiedAtMs: 1,
+          routes: [
+            {
+              modelId: "gpt-6.1-sol",
+              profile: "default",
+              capability: "admin",
+              supportedModelIds: ["gpt-6.1-sol"],
+            },
+          ],
+        },
+      }),
+    ).toThrow();
   });
 });
 

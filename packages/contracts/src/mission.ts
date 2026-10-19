@@ -17,6 +17,7 @@ import {
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
 import { MissionExecution } from "./missionExecution.ts";
+import type { MissionResultRecord, MissionResultReceipt } from "./missionResult.ts";
 
 /**
  * Canonical opt-in mission aggregate wire schemas. A mission is a small
@@ -145,9 +146,33 @@ export const MissionTaskAttempt = Schema.Struct({
 export type MissionTaskAttempt = typeof MissionTaskAttempt.Type;
 
 /**
+ * Absolute path with no `.` or `..` segments and no trailing slash.
+ * Decode rejects anything else; it does not rewrite a relative path into
+ * a scope.
+ */
+const isNormalizedAbsolutePath = (value: string): boolean => {
+  if (!value.startsWith("/") || value.includes("\\") || value.includes("\0")) return false;
+  if (value.length > 1 && value.endsWith("/")) return false;
+  const segments = value.slice(1).split("/");
+  return (
+    segments.length > 0 &&
+    segments.every((segment) => segment.length > 0 && segment !== "." && segment !== "..")
+  );
+};
+
+const NormalizedAbsolutePath = TrimmedNonEmptyString.check(
+  Schema.makeFilter(isNormalizedAbsolutePath, {
+    expected: "a normalized absolute path",
+  }),
+);
+
+/**
  * One task spec: identity, the binding project it routes to, content hashes,
  * dependency edges, acceptance links, and the current attempt/receipt
  * pointer. Deliberately transcript-free.
+ *
+ * Scope and necessity fields are canonical server-owned values. Each is
+ * optional so a legacy snapshot still decodes. Omitted means unavailable.
  */
 export const MissionTaskSpec = Schema.Struct({
   id: MissionTaskId,
@@ -158,9 +183,69 @@ export const MissionTaskSpec = Schema.Struct({
   dependencies: Schema.Array(MissionTaskId),
   acceptanceIds: Schema.Array(TrimmedNonEmptyString),
   attempt: Schema.optional(MissionTaskAttempt),
+  /**
+   * Normalized absolute writer path owned by the server. Absent on legacy
+   * snapshots, which leaves the scope unavailable.
+   */
+  writerScope: Schema.optional(NormalizedAbsolutePath),
+  /** Canonical shared-manifest paths. Omitted is unavailable, not an empty list. */
+  sharedManifestScopes: Schema.optional(Schema.Array(NormalizedAbsolutePath)),
+  /** Canonical GUI paths. Omitted is unavailable; a present empty list is empty. */
+  guiScopes: Schema.optional(Schema.Array(NormalizedAbsolutePath)),
+  /**
+   * Whether this task is necessary. Omitted is unavailable, not false.
+   */
+  taskNecessary: Schema.optional(Schema.Boolean),
   updatedAt: IsoDateTime,
 });
 export type MissionTaskSpec = typeof MissionTaskSpec.Type;
+
+/** One dependency's receipt hash, taken from a canonical accepted result. */
+export interface MissionDependencyReceiptHash {
+  readonly taskId: string;
+  readonly hash: string;
+}
+
+const acceptanceReceiptHash = (receipt: MissionResultReceipt): string =>
+  [
+    "mission-acceptance-receipt",
+    receipt.kind,
+    String(receipt.revision),
+    receipt.evidenceKind,
+    receipt.evidenceRef,
+    receipt.commitSet.join("\u0002"),
+    receipt.decidedBy,
+    receipt.decidedAt,
+  ].join("\u0001");
+
+/**
+ * Maps task id to the hash of its canonical acceptance receipt.
+ *
+ * Only results in `accepted` or `integrated` state qualify. Integrated
+ * records keep the acceptance receipt from the accept transition. The hash
+ * is that receipt's identity. Proposal `dependencyHashes`, spec hashes, and
+ * result digests are not inputs. A task with no acceptance receipt, a
+ * receipt that is not an acceptance, or two different acceptance receipts
+ * is omitted so the caller treats it as unavailable.
+ */
+export const dependencyReceiptHashesFromAcceptedResults = (
+  results: ReadonlyArray<MissionResultRecord>,
+): ReadonlyArray<MissionDependencyReceiptHash> => {
+  const hashes = new Map<string, string | null>();
+  for (const result of results) {
+    if (result.state !== "accepted" && result.state !== "integrated") continue;
+    const receipt = result.acceptanceReceipt;
+    const hash =
+      receipt === undefined || receipt.kind !== "acceptance"
+        ? null
+        : acceptanceReceiptHash(receipt);
+    const prior = hashes.get(result.taskId);
+    hashes.set(result.taskId, prior === undefined || prior === hash ? hash : null);
+  }
+  return [...hashes.entries()]
+    .flatMap(([taskId, hash]) => (hash === null ? [] : [{ taskId, hash }]))
+    .sort((left, right) => left.taskId.localeCompare(right.taskId));
+};
 
 export const Mission = Schema.Struct({
   schemaVersion: Schema.Literal(MISSION_SCHEMA_VERSION),

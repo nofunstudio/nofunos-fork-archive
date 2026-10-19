@@ -210,6 +210,42 @@ export const ServerProviderUpdateState = Schema.Struct({
 });
 export type ServerProviderUpdateState = typeof ServerProviderUpdateState.Type;
 
+export const ServerProviderAdmissionCapability = Schema.Literals([
+  "read_only",
+  "executable",
+  "writer",
+]);
+export type ServerProviderAdmissionCapability = typeof ServerProviderAdmissionCapability.Type;
+
+const VerifiedAtMillis = Schema.Number.check(
+  Schema.makeFilter((value) => Number.isFinite(value) && value >= 0, {
+    expected: "finite nonnegative milliseconds",
+  }),
+);
+
+/** One server-verified route on the provider instance this attestation belongs to. */
+export const ServerProviderAdmissionRoute = Schema.Struct({
+  modelId: TrimmedNonEmptyString,
+  profile: TrimmedNonEmptyString,
+  capability: ServerProviderAdmissionCapability,
+  supportedModelIds: Schema.Array(TrimmedNonEmptyString),
+});
+export type ServerProviderAdmissionRoute = typeof ServerProviderAdmissionRoute.Type;
+
+/**
+ * Authenticated account and route catalog for the enclosing provider's
+ * `instanceId`. Every field is required when the attestation is present.
+ * The field itself is optional: omitted means the instance did not attest.
+ */
+export const ServerProviderAdmissionAttestation = Schema.Struct({
+  accountId: TrimmedNonEmptyString,
+  company: TrimmedNonEmptyString,
+  billingMode: TrimmedNonEmptyString,
+  verifiedAtMs: VerifiedAtMillis,
+  routes: Schema.Array(ServerProviderAdmissionRoute),
+});
+export type ServerProviderAdmissionAttestation = typeof ServerProviderAdmissionAttestation.Type;
+
 export const ServerProvider = Schema.Struct({
   // Routing key for the configured instance this snapshot represents. This
   // is the only stable identity consumers may use for provider routing.
@@ -281,6 +317,13 @@ export const ServerProvider = Schema.Struct({
   versionAdvisory: Schema.optionalKey(ServerProviderVersionAdvisory),
   compatibilityAdvisory: Schema.optionalKey(ServerProviderCompatibilityAdvisory),
   updateState: Schema.optionalKey(ServerProviderUpdateState),
+  /**
+   * Attestation of this snapshot's `instanceId` and its authenticated
+   * account and routes. Omitted on legacy snapshots and when the provider
+   * cannot verify those facts. Absent means admission must deny. Clients
+   * do not supply it.
+   */
+  admissionAttestation: Schema.optional(ServerProviderAdmissionAttestation),
 });
 export type ServerProvider = typeof ServerProvider.Type;
 
