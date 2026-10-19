@@ -8,14 +8,21 @@ import {
   type ArtifactCompileInput,
   type CompiledArtifact,
 } from "@t3tools/nofun-artifacts/compiler";
+import {
+  emitToolBundle,
+  type ToolBundle,
+  type ToolBundleOptions,
+} from "@t3tools/nofun-artifacts/tool-bundle";
 import { HTML_RENDER_MAX_HEIGHT } from "@t3tools/shared/htmlRender";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import { AiError, McpServer } from "effect/ai";
 
+import * as ServerConfig from "../../../config.ts";
 import * as HtmlRender from "../../../htmlRender/HtmlRender.ts";
 import * as GuideHandlers from "./guideHandlers.ts";
 import * as PageHandlers from "./pageHandlers.ts";
@@ -55,6 +62,33 @@ const compile = (input: ArtifactCompileInput) =>
             message: `The No Fun artifact compiler failed: ${error instanceof Error ? error.message : String(error)}`,
           }),
   }).pipe(Effect.withSpan("NofunArtifact.compile"));
+
+/** Writes the Canvas bundle for a render that asked for one; a missing runtime is a failure, never an unpinned bundle. */
+const writeBundle = (
+  input: ArtifactCompileInput & {
+    readonly title: string;
+    readonly bundle: ToolBundleOptions;
+  },
+  outRoot: string,
+) =>
+  Effect.tryPromise({
+    try: (): Promise<ToolBundle> =>
+      emitToolBundle({
+        spec: input.spec,
+        tsx: input.tsx,
+        theme: input.theme,
+        title: input.title,
+        outRoot,
+        size: input.bundle.size,
+        background: input.bundle.background,
+        runtimeVersion: input.bundle.runtimeVersion,
+      }),
+    catch: (error) =>
+      new OrchestratorMcpFailure({
+        code: "invalid_request",
+        message: `Could not write the Canvas bundle: ${error instanceof Error ? error.message : String(error)}`,
+      }),
+  }).pipe(Effect.withSpan("NofunArtifact.bundle"));
 
 const stats = (compiled: CompiledArtifact) => ({
   theme: compiled.theme,
@@ -98,6 +132,15 @@ const handlers = {
         "nofun_artifact_render",
       );
       const compiled = yield* compile(input);
+      const config = yield* ServerConfig.ServerConfig;
+      const path = yield* Path.Path;
+      // Before anything is stored in the thread: a bundle request that cannot be pinned fails whole.
+      const bundle = input.bundle
+        ? yield* writeBundle(
+            { ...input, bundle: input.bundle },
+            path.join(config.stateDir, "artifact-bundles", thread.threadId),
+          )
+        : undefined;
       const htmlRender = yield* HtmlRender.HtmlRender;
       const reference = yield* htmlRender
         .publish({
@@ -117,6 +160,17 @@ const handlers = {
       return {
         htmlRender: { ...reference, display, autoOpen },
         artifact: stats(compiled),
+        ...(bundle
+          ? {
+              bundle: {
+                directory: bundle.dir,
+                manifestPath: bundle.manifestPath,
+                sha256: bundle.manifest.sha256,
+                createdAt: bundle.manifest.createdAt,
+                runtime: bundle.runtime,
+              },
+            }
+          : {}),
         message:
           "Shown to the reader above your reply. Don't mention or describe the artifact; reply with only what it doesn't already say.",
         ...playbookFor({ thread }),

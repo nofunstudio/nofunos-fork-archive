@@ -16,11 +16,12 @@ import {
   compilerVersion,
   deterministicStampInstant,
   readStamp,
+  stampInstant,
   type ArtifactStamp,
 } from "./stamp.ts";
 
 const USAGE =
-  "nofun-artifacts compile (--spec <file> | --tsx <file> | --page <file>) (--preset <id> | --theme <id> --size WxH) [--background transparent|match|#rrggbb] [--name <name>] [--asset-dir <dir>] [--linked --runtime-sha <sha>] --out <dir>";
+  "nofun-artifacts compile (--spec <file> | --tsx <file> | --page <file>) (--preset <id> | --theme <id> --size WxH) [--background transparent|match|#rrggbb] [--name <name>] [--asset-dir <dir>] [--linked --runtime-sha <sha> [--build-time now|<iso>]] --out <dir>";
 
 interface Flags {
   preset?: string;
@@ -35,6 +36,17 @@ interface Flags {
   out?: string;
   linked?: boolean;
   runtimeSha?: string;
+  buildTime?: string;
+}
+
+/** `--build-time now` is the wall clock, an ISO instant is used as given; unset keeps the reproducible stamp. */
+function buildInstant(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  if (value === "now") return stampInstant();
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime()))
+    throw new Error("--build-time must be now or an ISO instant.");
+  return stampInstant(parsed);
 }
 
 function specTitle(text: string): string | undefined {
@@ -97,6 +109,9 @@ function parseFlags(argv: readonly string[]): Flags {
       case "--runtime-sha":
         take("runtimeSha");
         break;
+      case "--build-time":
+        take("buildTime");
+        break;
       default:
         throw new Error(`Unknown argument ${JSON.stringify(flag)}. ${USAGE}`);
     }
@@ -131,6 +146,9 @@ async function compile(argv: readonly string[]): Promise<void> {
   }
   if (flags.runtimeSha && !flags.linked) {
     throw new Error(`--runtime-sha needs --linked. ${USAGE}`);
+  }
+  if (flags.buildTime && !flags.linked) {
+    throw new Error(`--build-time needs --linked. ${USAGE}`);
   }
   // Tests set this to force the missing-bundle exit without a components checkout.
   if (process.env.NOFUN_ARTIFACTS_FORCE_NO_OUTPUT === "1") {
@@ -178,7 +196,7 @@ async function compile(argv: readonly string[]): Promise<void> {
         compiler: compilerVersion(),
         lane: compiled.lane,
         theme: compiled.theme,
-        at: deterministicStampInstant(bytes, componentsCommit()),
+        at: buildInstant(flags.buildTime) ?? deterministicStampInstant(bytes, componentsCommit()),
       }
     : readStamp(compiled.html);
   if (!stamp) throw new Error("Compiled HTML is missing the nofun-artifact stamp.");

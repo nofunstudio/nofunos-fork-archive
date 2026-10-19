@@ -10,9 +10,11 @@ import {
   HTML_RENDER_MAX_TITLE_LENGTH,
   HTML_RENDER_MIN_HEIGHT,
 } from "@t3tools/shared/htmlRender";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { Tool, Toolkit } from "effect/ai";
 
+import * as ServerConfig from "../../../config.ts";
 import * as HtmlRender from "../../../htmlRender/HtmlRender.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
@@ -156,6 +158,29 @@ export const NofunArtifactRenderTool = Tool.make(NOFUN_ARTIFACT_RENDER_TOOL_NAME
         description: `Frame height cap in CSS pixels, ${HTML_RENDER_MIN_HEIGHT}-${HTML_RENDER_MAX_HEIGHT}. Omit to fit the page; pass less than the preview's contentHeight to make it scroll.`,
       }),
     ),
+    bundle: Schema.optional(
+      Schema.Struct({
+        size: Schema.optional(
+          Schema.String.annotate({
+            description: "Canvas card size WxH, 16-4096 each. Defaults to 640x480.",
+          }),
+        ),
+        background: Schema.optional(
+          Schema.String.annotate({
+            description: "transparent (default), match, or #rrggbb.",
+          }),
+        ),
+        runtimeVersion: Schema.optional(
+          Schema.String.check(Schema.isMaxLength(64)).annotate({
+            description:
+              "No Fun UI runtime version (folder name) to pin. Defaults to the host's pinned runtime.",
+          }),
+        ),
+      }).annotate({
+        description:
+          "Also write a Canvas bundle (nofun-canvas-artifact-bundle v1) that loads the pinned No Fun UI runtime, and return its directory, manifest sha256 and runtime pin. Omit to only show the page in the thread.",
+      }),
+    ),
     display: Schema.optional(
       Schema.Literals(["inline", "card"]).annotate({
         description:
@@ -179,6 +204,15 @@ export const NofunArtifactRenderTool = Tool.make(NOFUN_ARTIFACT_RENDER_TOOL_NAME
       autoOpen: Schema.optional(Schema.Boolean),
     }),
     artifact: ArtifactStats,
+    bundle: Schema.optional(
+      Schema.Struct({
+        directory: Schema.String,
+        manifestPath: Schema.String,
+        sha256: Schema.String,
+        createdAt: Schema.String,
+        runtime: Schema.Struct({ version: Schema.String, sha256: Schema.String }),
+      }),
+    ),
     message: Schema.String,
     playbook: Schema.optional(Schema.String),
   }),
@@ -188,6 +222,8 @@ export const NofunArtifactRenderTool = Tool.make(NOFUN_ARTIFACT_RENDER_TOOL_NAME
     McpInvocationContext.McpInvocationContext,
     ThreadManagementService.ThreadManagementService,
     HtmlRender.HtmlRender,
+    ServerConfig.ServerConfig,
+    Path.Path,
   ],
 })
   .annotate(Tool.Title, "Render No Fun artifact")
