@@ -56,14 +56,35 @@ export function parseCanvasBackground(text: string): "transparent" | "match" | `
   );
 }
 
+const NETWORK_URL = /https?:\/\//gi;
+const hideWith = (text: string, slashes: string) =>
+  text.replace(NETWORK_URL, (match) => `${match.slice(0, -2)}${slashes}`);
+
 /**
- * Hides `http://` and `https://` from Canvas's byte lint without changing what JavaScript or JSON
- * evaluate to. React's SVG path is `createElementNS("http://www.w3.org/2000/svg")`; deleting a slash
- * there makes every chart throw. `\u002f` is a slash inside JS and JSON strings, and the file no
- * longer contains the two-slash sequence the lint rejects.
+ * Hides `http://` and `https://` from Canvas's byte lint without changing what the page reads, by
+ * context. Inside `<script>` bodies (JS and JSON strings) `\u002f` is a slash, so React's SVG
+ * `createElementNS("http://www.w3.org/2000/svg")` keeps working. Inside `<style>` bodies `\/` is a CSS
+ * escape for a slash. Everywhere else (text such as `<title>`, attribute values, tag markup) a
+ * `&#47;` character reference decodes to the same slash, so visible text and attributes are unchanged.
  */
 export function stripNetworkUrls(html: string): string {
-  return html.replace(/https?:\/\//gi, (match) => `${match.slice(0, -2)}\\u002f\\u002f`);
+  let out = "";
+  let last = 0;
+  for (const block of html.matchAll(/(<(script|style)\b[^>]*>)([\s\S]*?)(<\/\2\s*>)/gi)) {
+    const [whole, open, tag, body, close] = block as unknown as [
+      string,
+      string,
+      string,
+      string,
+      string,
+    ];
+    out += hideWith(html.slice(last, block.index), "&#47;&#47;");
+    out += hideWith(open, "&#47;&#47;");
+    out += hideWith(body, tag.toLowerCase() === "script" ? "\\u002f\\u002f" : "\\/\\/");
+    out += hideWith(close, "&#47;&#47;");
+    last = block.index! + whole.length;
+  }
+  return out + hideWith(html.slice(last), "&#47;&#47;");
 }
 
 const escapeHtml = (text: string) =>

@@ -7,10 +7,11 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
 
-import { MANIFEST_KEYS } from "../src/canvas-bundle.ts";
+import { MANIFEST_KEYS, stripNetworkUrls, writeCanvasBundle } from "../src/canvas-bundle.ts";
 import { readRuntimePin, runtimeRoot } from "../src/runtime-pin.ts";
 import { componentsDir } from "../src/live/source.ts";
-import { stampInstant } from "../src/stamp.ts";
+import { runtimeDigest } from "../src/runtime-pin.ts";
+import { stampInstant, type ArtifactStamp } from "../src/stamp.ts";
 import { emitToolBundle } from "../src/tool-bundle.ts";
 
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
@@ -125,3 +126,106 @@ test("emitToolBundle writes a pinned bundle with a real timestamp", { skip: !can
     NodeFs.rmSync(out, { recursive: true, force: true });
   }
 });
+
+const decodeSlash = (text: string) => text.replaceAll("&#47;", "/");
+
+test("stripNetworkUrls keeps HTML text and attributes readable and escapes only script and style bodies", () => {
+  const html =
+    '<html><head><title>Docs https://example.test/a</title><link rel="x" href="http://example.test/h"></head>' +
+    '<body data-u="https://example.test/b">See HTTP://Example.test here' +
+    '<script>const ns="http://www.w3.org/2000/svg";</script>' +
+    '<script type="application/json" id="d">{"u":"https://example.test/j"}</script>' +
+    "<style>.a{background:url(https://example.test/i.png)}</style></body></html>";
+  const out = stripNetworkUrls(html);
+  assert.equal(/https?:\/\//i.test(out), false);
+  assert.ok(out.includes("<title>Docs https:&#47;&#47;example.test/a</title>"));
+  assert.ok(out.includes('href="http:&#47;&#47;example.test/h"'));
+  assert.ok(out.includes("See HTTP:&#47;&#47;Example.test here"));
+  const script = /<script>([^<]*)<\/script>/.exec(out)![1]!;
+  assert.equal(Function(`${script};return ns`)(), "http://www.w3.org/2000/svg");
+  const json = /<script type="application\/json" id="d">([^<]*)<\/script>/.exec(out)![1]!;
+  assert.equal(JSON.parse(json).u, "https://example.test/j");
+  assert.ok(out.includes("url(https:\\/\\/example.test/i.png)"));
+  // Decoding the character references gives back the original markup outside script and style.
+  assert.equal(
+    decodeSlash(out.slice(0, out.indexOf("<script>"))),
+    html.slice(0, html.indexOf("<script>")),
+  );
+});
+
+test("a URL in the artifact title is written to <title> unchanged in meaning, and the manifest still hashes the entry", () => {
+  const out = tmp("nf-title-");
+  const stamp: ArtifactStamp = {
+    components: "8922135e5cdf4d172be6e0eaeffa73009b6a5257",
+    compiler: "0.0.0",
+    lane: "spec",
+    theme: "kobra",
+    at: "2026-10-19T20:30:00Z",
+  };
+  try {
+    const manifest = writeCanvasBundle({
+      outDir: out,
+      html: "<!doctype html><html><head><title>Docs https://example.test</title></head><body></body></html>",
+      name: "Docs https://example.test",
+      size: { width: 640, height: 480 },
+      background: "transparent",
+      stamp,
+      sourceFile: { name: "a.json", bytes: Buffer.from("{}") },
+    });
+    const html = NodeFs.readFileSync(NodePath.join(out, "index.html"), "utf8");
+    assert.ok(html.includes("<title>Docs https:&#47;&#47;example.test</title>"));
+    assert.equal(html.includes("\\u002f"), false);
+    assert.equal(manifest.name, "Docs https://example.test");
+    assert.equal(manifest.sha256, createHash("sha256").update(html).digest("hex"));
+  } finally {
+    NodeFs.rmSync(out, { recursive: true, force: true });
+  }
+});
+
+// The compile must read module and CSS facts from the same runtime root the pin was read from, not from
+// package dist. Needs a components checkout for the compiler; the runtime itself is a tiny fake.
+const canCompile = NodeFs.existsSync(NodePath.join(componentsDir(), "registry.json"));
+
+test(
+  "emitToolBundle validates imports against the pinned root's manifest",
+  { skip: !canCompile },
+  async () => {
+    const root = tmp("nf-root-");
+    const out = tmp("nf-root-out-");
+    try {
+      const version = "0123456789ab";
+      const dir = NodePath.join(root, version);
+      NodeFs.mkdirSync(dir, { recursive: true });
+      NodeFs.writeFileSync(NodePath.join(dir, "runtime.css"), "body{margin:0}\n");
+      NodeFs.writeFileSync(NodePath.join(dir, "runtime.js"), "window.NoFunUI={};\n");
+      NodeFs.writeFileSync(
+        NodePath.join(dir, "manifest.json"),
+        JSON.stringify({ modules: ["react", "react/jsx-runtime", "@nofun/ui/present-block"] }),
+      );
+      const tsx = (name: string) =>
+        `import { Block } from "@nofun/ui/${name}"; export default function App(){ return <Block/>; }\n`;
+      await assert.rejects(
+        emitToolBundle({
+          tsx: tsx("absent-block"),
+          title: "Absent",
+          outRoot: out,
+          runtimeRoot: root,
+          runtimeVersion: version,
+        }),
+        /"@nofun\/ui\/absent-block" is not in this runtime/,
+      );
+      const ok = await emitToolBundle({
+        tsx: tsx("present-block"),
+        title: "Present",
+        outRoot: out,
+        runtimeRoot: root,
+        runtimeVersion: version,
+      });
+      assert.equal(ok.runtime.version, version);
+      assert.equal(ok.runtime.sha256, runtimeDigest(dir));
+    } finally {
+      NodeFs.rmSync(root, { recursive: true, force: true });
+      NodeFs.rmSync(out, { recursive: true, force: true });
+    }
+  },
+);

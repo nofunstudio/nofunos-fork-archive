@@ -13,7 +13,7 @@ import {
 } from "./canvas-bundle.ts";
 import { compileLinked } from "./linked.ts";
 import { componentsCommit, readComponentsPin } from "./live/source.ts";
-import { readRuntimePin, type RuntimePin } from "./runtime-pin.ts";
+import { readRuntimePin, runtimeRoot, type RuntimePin } from "./runtime-pin.ts";
 import { compilerVersion, stampInstant, type ArtifactStamp } from "./stamp.ts";
 
 export const DEFAULT_BUNDLE_SIZE = "640x480";
@@ -69,7 +69,9 @@ export async function emitToolBundle(input: ToolBundleInput): Promise<ToolBundle
   const size = parseCanvasSize(input.size ?? DEFAULT_BUNDLE_SIZE);
   const background = parseCanvasBackground(input.background ?? "transparent");
   const version = (input.runtimeVersion ?? defaultRuntimeVersion()).trim().toLowerCase();
-  const runtime = readRuntimePin(version, input.runtimeRoot);
+  // One root for the pin and the compile: module validation and CSS dedupe read the pinned runtime's manifest.
+  const root = input.runtimeRoot ?? runtimeRoot();
+  const runtime = readRuntimePin(version, root);
   const lane = hasSpec ? "spec" : "tsx";
   const sourceText = hasSpec
     ? JSON.stringify(typeof input.spec === "string" ? JSON.parse(input.spec) : input.spec, null, 2)
@@ -80,6 +82,7 @@ export async function emitToolBundle(input: ToolBundleInput): Promise<ToolBundle
     theme: input.theme,
     size,
     runtimeSHA: runtime.version,
+    runtimeManifest: NodePath.join(root, runtime.version, "manifest.json"),
     title: input.title,
   });
   const stamp: ArtifactStamp = {
