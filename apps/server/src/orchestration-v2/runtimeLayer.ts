@@ -1,9 +1,14 @@
 import * as AdmissionControl from "./AdmissionControl.ts";
 import * as Admission from "./Admission.ts";
 import * as MissionWorkerResults from "./MissionWorkerResults.ts";
+import * as MissionAdmissionFacts from "./MissionAdmissionFacts.ts";
+import * as MissionAdmissionStore from "./MissionAdmissionStore.ts";
+import * as MissionService from "./MissionService.ts";
 import * as UsageLimitRecoveryWorker from "./UsageLimitRecoveryWorker.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as Layer from "effect/Layer";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as OrchestrationCommandReceipts from "../persistence/OrchestrationCommandReceipts.ts";
 import * as OrchestrationEventStore from "../persistence/OrchestrationEventStore.ts";
 import * as ProviderSessionRuntime from "../persistence/ProviderSessionRuntime.ts";
@@ -206,6 +211,19 @@ const layerMissionWorkerResults = MissionWorkerResults.layer.pipe(
   Layer.provide(Layer.mergeAll(layerStores, IdAllocator.layer)),
 );
 
+const layerMissionAdmissionProvided = Layer.unwrap(
+  Effect.serviceOption(MissionService.MissionAuthority).pipe(
+    Effect.map((authority) =>
+      Option.isNone(authority)
+        ? Layer.empty
+        : MissionAdmissionStore.layer.pipe(
+            Layer.provide(Layer.merge(layerEventInfrastructure, MissionAdmissionFacts.layer)),
+            Layer.provide(Layer.succeed(MissionService.MissionAuthority, authority.value)),
+          ),
+    ),
+  ),
+);
+
 const layerOrchestratorProvided = Orchestrator.layer.pipe(
   Layer.provide(
     Layer.mergeAll(
@@ -248,6 +266,7 @@ const layerAgentSessionImporterProvided = AgentSessionImporter.layer.pipe(
 
 const layerThreadManagementProvided = ThreadManagementService.layerWithLegacyImporter.pipe(
   Layer.provide(Layer.merge(layerOrchestratorProvided, layerLegacyV1ThreadImporterProvided)),
+  Layer.provide(Layer.merge(layerMissionAdmissionProvided, layerRuntimePolicyProvided)),
 );
 export const layerProjectSetupScriptRunner = ProjectSetupScriptRunner.layer.pipe(
   Layer.provide(layerProjectService),
@@ -332,6 +351,7 @@ const layerAdmissionControlProvided = AdmissionControl.layer.pipe(
 
 export const layer = Layer.mergeAll(
   Admission.layer,
+  layerMissionAdmissionProvided,
   layerAdmissionControlProvided,
   layerOrchestratorProvided,
   layerThreadManagementProvided,
