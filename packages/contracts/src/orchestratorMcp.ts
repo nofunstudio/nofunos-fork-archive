@@ -279,6 +279,17 @@ export const OrchestratorMcpDelegateTaskInput = Schema.Struct({
 export type OrchestratorMcpDelegateTaskInput = typeof OrchestratorMcpDelegateTaskInput.Type;
 
 export const OrchestratorMcpDelegateTaskResult = Schema.Struct({
+  /** Resolved launch metadata; null when no independent persisted list exists. */
+  requiredContext: Schema.optional(
+    Schema.NullOr(
+      Schema.Array(
+        Schema.Struct({
+          path: OrchestratorMcpRequiredContextEntry.fields.path,
+          sha256: OrchestratorMcpRequiredContextEntry.fields.hash,
+        }),
+      ).check(Schema.isMaxLength(ORCHESTRATOR_MCP_REQUIRED_CONTEXT_MAX_ENTRIES)),
+    ),
+  ),
   taskId: NodeId,
   childThreadId: ThreadId,
   childRunId: Schema.NullOr(RunId),
@@ -434,6 +445,19 @@ export const OrchestratorMcpThreadReadInput = Schema.Struct({
 export type OrchestratorMcpThreadReadInput = typeof OrchestratorMcpThreadReadInput.Type;
 
 export const OrchestratorMcpThreadDetail = Schema.Struct({
+  contextUsage: Schema.optional(
+    Schema.Struct({
+      usedTokens: NonNegativeInt,
+      maxTokens: Schema.NullOr(NonNegativeInt),
+      updatedAt: IsoDateTime,
+    }),
+  ),
+  lastCompaction: Schema.optional(
+    Schema.Struct({
+      at: IsoDateTime,
+      summaryChars: NonNegativeInt,
+    }),
+  ),
   threadId: ThreadId,
   projectId: ProjectId,
   title: Schema.String,
@@ -566,6 +590,12 @@ const OrchestratorMcpUsageHeadroom = Schema.Struct({
 });
 
 export const OrchestratorMcpHostCapacity = Schema.Struct({
+  delegatedChildren: Schema.optional(
+    Schema.Struct({
+      active: NonNegativeInt,
+      byProviderInstance: Schema.Record(Schema.String, NonNegativeInt),
+    }),
+  ),
   observedAtMs: Schema.Number,
   hostId: Schema.String,
   bootId: Schema.NullOr(Schema.String),

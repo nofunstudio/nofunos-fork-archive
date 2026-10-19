@@ -1424,6 +1424,9 @@ const make = Effect.gen(function* () {
       const resultTransfer = resultTransfers[0] ?? null;
       const terminalStatus = terminalRun === undefined ? null : taskStatusForRun(terminalRun);
       const response = {
+        // The resolved list is rendered into prompt bytes, not persisted as
+        // independent metadata. Do not infer verified paths/hashes by parsing text.
+        requiredContext: null,
         taskId: task.id,
         childThreadId: task.childThreadId,
         childRunId: childRun?.id ?? null,
@@ -1837,6 +1840,38 @@ const make = Effect.gen(function* () {
             sampledAtMs,
           ),
         );
+        const snapshot = yield* threadManagement
+          .getShellSnapshot()
+          .pipe(Effect.mapError(threadManagementFailure));
+        // The parent task projection owns terminality: a completed root run
+        // can still have pending nested work. Shell run status alone undercounts it.
+        const taskGroups = yield* Effect.forEach(
+          [...snapshot.threads, ...(snapshot.archivedThreads ?? [])],
+          (thread) =>
+            threadManagement.getThreadRecords(thread.id, ["subagents"]).pipe(
+              Effect.map((records) => records.subagents),
+              Effect.mapError(threadManagementFailure),
+            ),
+          { concurrency: 4 },
+        );
+        const counts = new Map<string, number>();
+        const seen = new Set<ThreadId>();
+        let active = 0;
+        for (const tasks of taskGroups) {
+          for (const task of tasks) {
+            if (
+              task.origin !== "app_owned" ||
+              task.childThreadId === null ||
+              seen.has(task.childThreadId) ||
+              ["completed", "failed", "cancelled", "interrupted"].includes(task.status)
+            )
+              continue;
+            seen.add(task.childThreadId);
+            counts.set(task.providerInstanceId, (counts.get(task.providerInstanceId) ?? 0) + 1);
+            active += 1;
+          }
+        }
+        const byProviderInstance = Object.fromEntries(counts);
         const nowMs = yield* Clock.currentTimeMillis;
         return {
           parentThreadId: parent?.thread.id ?? null,
@@ -1844,7 +1879,7 @@ const make = Effect.gen(function* () {
           inheritedModel: parent?.thread.modelSelection.model ?? null,
           runtimeMode: limits.runtimeMode,
           interactionMode: limits.interactionMode,
-          hostCapacity,
+          hostCapacity: { ...hostCapacity, delegatedChildren: { active, byProviderInstance } },
           providers: providers.map((provider) => {
             const constraints = providerConstraints(
               provider,
@@ -2479,8 +2514,72 @@ const make = Effect.gen(function* () {
             );
           }
         }
+        // Same precedence as apps/web/src/lib/contextWindow.ts:
+        // latest live turn usage, active provider-thread snapshot, then compaction.
+        // Read only compaction items, independently of the caller's timeline page.
+        const context = yield* threadManagement
+          .getThreadRecords(input.threadId, ["providerTurns", "providerThreads", "turnItems"], {
+            turnItemTypes: ["compaction"],
+            messageRoles: [],
+          })
+          .pipe(Effect.mapError(threadManagementFailure));
+        const liveUsage = (context.providerTurns ?? []).findLast(
+          (turn) => turn.tokenUsage !== undefined,
+        )?.tokenUsage;
+        const providerThread = (context.providerThreads ?? []).find(
+          (thread) => thread.id === target.thread.activeProviderThreadId,
+        );
+        let latestCompaction: Extract<OrchestrationV2TurnItem, { type: "compaction" }> | undefined;
+        let tokenCompaction: typeof latestCompaction;
+        for (const item of context.turnItems ?? []) {
+          if (item.type !== "compaction") continue;
+          if (latestCompaction === undefined || item.ordinal > latestCompaction.ordinal)
+            latestCompaction = item;
+          if (
+            item.afterTokenCount !== undefined &&
+            Number.isFinite(item.afterTokenCount) &&
+            item.afterTokenCount >= 0 &&
+            (tokenCompaction === undefined || item.ordinal > tokenCompaction.ordinal)
+          )
+            tokenCompaction = item;
+        }
+        const contextUsage =
+          liveUsage !== undefined
+            ? {
+                usedTokens: Math.max(0, liveUsage.usedTokens),
+                maxTokens: liveUsage.maxTokens ?? null,
+                updatedAt: liveUsage.updatedAt,
+              }
+            : providerThread?.contextUsage != null
+              ? {
+                  usedTokens: providerThread.contextUsage.usedTokens,
+                  maxTokens: providerThread.contextUsage.maxTokens ?? null,
+                  updatedAt: DateTime.formatIso(providerThread.updatedAt),
+                }
+              : tokenCompaction !== undefined
+                ? {
+                    usedTokens: tokenCompaction.afterTokenCount!,
+                    maxTokens: null,
+                    updatedAt: DateTime.formatIso(
+                      tokenCompaction.startedAt ?? tokenCompaction.updatedAt,
+                    ),
+                  }
+                : undefined;
         return {
-          thread: threadDetail(target, timeline.totalItems),
+          thread: {
+            ...threadDetail(target, timeline.totalItems),
+            ...(contextUsage === undefined ? {} : { contextUsage }),
+            ...(latestCompaction === undefined
+              ? {}
+              : {
+                  lastCompaction: {
+                    at: DateTime.formatIso(
+                      latestCompaction.startedAt ?? latestCompaction.updatedAt,
+                    ),
+                    summaryChars: latestCompaction.summary?.length ?? 0,
+                  },
+                }),
+          },
           recentRuns: target.runs
             .toSorted((left, right) => right.ordinal - left.ordinal)
             .slice(0, input.runLimit ?? DEFAULT_THREAD_RUN_LIMIT)

@@ -198,6 +198,18 @@ Returns:
 Unavailable providers include model-visible constraints such as missing V2
 adapter support, disabled state, missing executable, or missing authentication.
 
+### Capacity and context reads
+
+`orchestrator_capabilities.hostCapacity.delegatedChildren` counts nonterminal
+app-owned child tasks in this environment, split by their provider instance.
+`t3_thread_read.thread.contextUsage` follows the web meter: latest reported turn,
+then active provider snapshot, then the last valid compaction token count.
+`lastCompaction` carries only its time and summary character count, even outside
+that timeline page. Missing observations omit these fields; no tokens are guessed.
+`task_status.requiredContext` is currently null: launch references persist in
+prompt bytes, without an independent resolved path/hash list. These reads add
+no slot limit, queue, compaction policy, or skill-selection controller.
+
 ### Mission-admitted delegation
 
 `delegate_task` accepts `mission: {missionId, taskId, attemptKey:

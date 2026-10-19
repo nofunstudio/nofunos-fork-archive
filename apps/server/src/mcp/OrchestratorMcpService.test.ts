@@ -14,6 +14,11 @@ import {
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
+  ProviderThreadId,
+  ProviderTurnId,
+  TurnItemId,
+  type OrchestrationV2ThreadShell,
+  type OrchestrationV2TurnItem,
   RunId,
   ThreadId,
   type OrchestrationV2ThreadProjection,
@@ -660,6 +665,8 @@ describe("OrchestratorMcpService provider resolution", () => {
           NodeServices.layer,
           Layer.mock(ThreadManagementService.ThreadManagementService)({
             getThreadRecords: () => Effect.succeed(parentProjection([])),
+            getShellSnapshot: () =>
+              Effect.succeed({ threads: [], projects: [], sequence: 0 } as never),
           }),
           Layer.mock(ProviderRegistry.ProviderRegistry)({
             getProviders: Effect.sync(() => providers),
@@ -1309,6 +1316,262 @@ describe("OrchestratorMcpService provider resolution", () => {
         }
       }),
   );
+  describe("capacity and context exposure", () => {
+    const at = DateTime.makeUnsafe("2026-10-19T08:00:00.000Z");
+    const later = DateTime.makeUnsafe("2026-10-19T08:01:00.000Z");
+    const providerThreadId = ProviderThreadId.make("provider-thread:capacity");
+    const projection = (): {
+      -readonly [K in keyof OrchestrationV2ThreadProjection]: OrchestrationV2ThreadProjection[K];
+    } => ({
+      ...parentProjection([]),
+      thread: {
+        ...parentProjection([]).thread,
+        branch: null,
+        worktreePath: null,
+        lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: parentThreadId },
+        activeProviderThreadId: providerThreadId,
+        archivedAt: null,
+        deletedAt: null,
+        createdAt: at,
+        updatedAt: at,
+      },
+      runs: parentProjection([]).runs.map((run) => ({
+        ...run,
+        requestedAt: at,
+        startedAt: at,
+        completedAt: null,
+      })),
+      providerTurns: [],
+      providerThreads: [],
+      runtimeRequests: [],
+      turnItems: [],
+      visibleTurnItems: [],
+      messages: [],
+      updatedAt: at,
+    });
+    const compact = (
+      ordinal: number,
+      summary: string,
+      afterTokenCount?: number,
+    ): OrchestrationV2TurnItem => ({
+      id: TurnItemId.make(`compaction:${ordinal}`),
+      threadId: parentThreadId,
+      runId: null,
+      nodeId: null,
+      providerThreadId,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal,
+      type: "compaction",
+      status: "completed",
+      title: null,
+      startedAt: later,
+      completedAt: later,
+      updatedAt: later,
+      driver: ProviderDriverKind.make("codex"),
+      summary,
+      ...(afterTokenCount === undefined ? {} : { afterTokenCount }),
+    });
+    const withExposure = <A, E, R>(
+      current: OrchestrationV2ThreadProjection,
+      use: (service: OrchestratorMcpService.OrchestratorMcpServiceShape) => Effect.Effect<A, E, R>,
+      shells: ReadonlyArray<OrchestrationV2ThreadShell> = [],
+    ) =>
+      Effect.gen(function* () {
+        return yield* use(yield* OrchestratorMcpService.OrchestratorMcpService);
+      }).pipe(
+        Effect.provide(
+          OrchestratorMcpService.layer.pipe(
+            Layer.provide(
+              Layer.mergeAll(
+                NodeServices.layer,
+                Layer.mock(ThreadManagementService.ThreadManagementService)({
+                  getThreadRecords: (id) =>
+                    Effect.succeed(id === parentThreadId ? current : childProjection),
+                  getThreadShell: () =>
+                    Effect.succeed(current.thread as unknown as OrchestrationV2ThreadShell),
+                  getProjectThreadRecords: () => Effect.succeed(current),
+                  getShellSnapshot: () =>
+                    Effect.succeed({ threads: shells, projects: [], sequence: 0 } as never),
+                  getTimelinePage: () =>
+                    Effect.succeed({ items: [], totalItems: 0, hasMore: false }),
+                }),
+                providerRegistryLayer([]),
+                adapterRegistryLayer([]),
+                Layer.mock(ProjectService.ProjectService)({}),
+                Layer.mock(SecretRequests.SecretRequests)({}),
+                Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+              ),
+            ),
+          ),
+        ),
+      );
+
+    it.effect(
+      "counts nonterminal delegated tasks by instance even when a child root finished before nested work",
+      () => {
+        const current = projection();
+        const task = (
+          name: string,
+          instanceId: ProviderInstanceId,
+          status: "running" | "completed",
+          origin: "app_owned" | "provider_native" = "app_owned",
+        ) =>
+          ({
+            id: NodeId.make(name),
+            threadId: parentThreadId,
+            childThreadId: ThreadId.make(`child:${name}`),
+            providerInstanceId: instanceId,
+            status,
+            origin,
+          }) as OrchestrationV2ThreadProjection["subagents"][number];
+        current.subagents = [
+          task("running-codex", codexInstanceId, "running"),
+          task("running-other", antigravityInstanceId, "running"),
+          task("completed-codex", codexInstanceId, "completed"),
+          task("native", codexInstanceId, "running", "provider_native"),
+        ];
+        const parentShell = {
+          ...current.thread,
+          activeSubagentCount: 3,
+        } as unknown as OrchestrationV2ThreadShell;
+        const completedRootShell = {
+          ...current.thread,
+          id: ThreadId.make("child:running-other"),
+          creationSource: "mcp",
+          modelSelection: { instanceId: antigravityInstanceId, model: "fixture" },
+          status: "completed",
+          activeSubagentCount: 0,
+          lineage: {
+            parentThreadId,
+            rootThreadId: parentThreadId,
+            relationshipToParent: "subagent",
+          },
+        } as unknown as OrchestrationV2ThreadShell;
+        return withExposure(
+          current,
+          (service) =>
+            Effect.gen(function* () {
+              const result = yield* service.capabilities(scope);
+              assert.deepEqual(result.hostCapacity?.delegatedChildren, {
+                active: 2,
+                byProviderInstance: { codex: 1, antigravity: 1 },
+              });
+            }),
+          [parentShell, completedRootShell],
+        );
+      },
+    );
+
+    it.effect(
+      "reads the latest token-usage event, then provider usage, and omits absent usage",
+      () => {
+        const current = projection();
+        return withExposure(current, (service) =>
+          Effect.gen(function* () {
+            assert.notProperty(
+              (yield* service.readThread(scope, { threadId: parentThreadId })).thread,
+              "contextUsage",
+            );
+            current.providerTurns = [
+              {
+                id: ProviderTurnId.make("turn:usage"),
+                providerThreadId,
+                nodeId: parentNodeId,
+                runAttemptId: null,
+                nativeTurnRef: null,
+                ordinal: 1,
+                status: "running",
+                startedAt: at,
+                completedAt: null,
+                tokenUsage: {
+                  usedTokens: 42000,
+                  maxTokens: 200000,
+                  updatedAt: DateTime.formatIso(at),
+                },
+              },
+            ];
+            const read = yield* service.readThread(scope, { threadId: parentThreadId });
+            assert.deepEqual(read.thread.contextUsage, {
+              usedTokens: 42000,
+              maxTokens: 200000,
+              updatedAt: DateTime.formatIso(at),
+            });
+            current.providerTurns = [];
+            current.providerThreads = [
+              {
+                id: providerThreadId,
+                contextUsage: { usedTokens: 1200 },
+                updatedAt: later,
+              } as never,
+            ];
+            assert.deepEqual(
+              (yield* service.readThread(scope, { threadId: parentThreadId })).thread.contextUsage,
+              { usedTokens: 1200, maxTokens: null, updatedAt: DateTime.formatIso(later) },
+            );
+          }),
+        );
+      },
+    );
+
+    it.effect(
+      "reads newest compaction metadata outside the requested timeline page and falls back to its token count",
+      () => {
+        const current = projection();
+        current.turnItems = [compact(1, "older", 100), compact(2, "summary", 200)];
+        return withExposure(current, (service) =>
+          Effect.gen(function* () {
+            const result = yield* service.readThread(scope, { threadId: parentThreadId, limit: 1 });
+            assert.deepEqual(result.items, []);
+            assert.deepEqual(result.thread.lastCompaction, {
+              at: DateTime.formatIso(later),
+              summaryChars: 7,
+            });
+            assert.deepEqual(result.thread.contextUsage, {
+              usedTokens: 200,
+              maxTokens: null,
+              updatedAt: DateTime.formatIso(later),
+            });
+            assert.notProperty(result.thread.lastCompaction!, "summary");
+            current.turnItems = [];
+            const read = yield* service.readThread(scope, { threadId: parentThreadId });
+            assert.notProperty(read.thread, "lastCompaction");
+            assert.notProperty(read.thread, "contextUsage");
+          }),
+        );
+      },
+    );
+
+    it.effect(
+      "reports null requiredContext because resolved launch metadata has no persisted column",
+      () => {
+        const current = projection();
+        // Prompt bytes persist, but they are not an independently stored resolved-context list.
+        current.subagents = [
+          {
+            id: taskId,
+            threadId: parentThreadId,
+            origin: "app_owned",
+            childThreadId,
+            prompt:
+              "required_references:\n  - /skills/example/SKILL.md | inline | read\nsha256=" +
+              "a".repeat(64),
+            providerInstanceId: codexInstanceId,
+            driver: ProviderDriverKind.make("codex"),
+            model: "fixture",
+            result: null,
+            status: "running",
+          } as never,
+        ];
+        return withExposure(current, (service) =>
+          Effect.gen(function* () {
+            assert.isNull((yield* service.taskStatus(scope, taskId)).requiredContext);
+          }),
+        );
+      },
+    );
+  });
   describe("delegate_task mission admission", () => {
     const scratch: Array<string> = [];
     afterAll(() => {
