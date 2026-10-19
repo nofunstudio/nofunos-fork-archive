@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import * as NodeFs from "node:fs";
 import * as NodeOs from "node:os";
@@ -13,7 +14,8 @@ import {
   readRuntimePin,
   runtimeDigest,
 } from "../src/runtime-pin.ts";
-import type { ArtifactStamp } from "../src/stamp.ts";
+import { readStamp, type ArtifactStamp } from "../src/stamp.ts";
+import { fileURLToPath } from "node:url";
 
 const sha = (bytes: Buffer | string) => createHash("sha256").update(bytes).digest("hex");
 const VERSION = "580e64f46a50";
@@ -178,3 +180,87 @@ test("canvas-t3 preset neutralises T3's blue primary, ring, focus and info tone"
   }
   assert.doesNotMatch(NO_BLUE_T3_CSS, /#[0-9a-f]{3,6}|blue/i);
 });
+
+// The entry meta, stamp.json and manifest.runtime must name the same runtime version: the hosts read
+// `linked=<version>` from the entry meta (Canvas WebArtifactStamp, the Notes viewer) and refuse a
+// pinned bundle whose meta lacks it.
+function linkedPieces(out: string) {
+  const html = NodeFs.readFileSync(NodePath.join(out, "index.html"), "utf8");
+  const meta = /<meta name="nofun-artifact" content="([^"]*)">/.exec(html)?.[1] ?? "";
+  const pieces = meta.split(";").filter((piece) => piece.startsWith("linked="));
+  const stampJson = JSON.parse(NodeFs.readFileSync(NodePath.join(out, "stamp.json"), "utf8"));
+  const manifest = JSON.parse(NodeFs.readFileSync(NodePath.join(out, "manifest.json"), "utf8"));
+  return { meta, pieces, stampJson, manifest };
+}
+
+// The compiler's own linked page: a meta that already has linked= (what linked.ts emits).
+const LINKED_PAGE = `<!doctype html><html><head><meta name="nofun-artifact" content="components=${VERSION};lane=spec;theme=t3;size=640x440;at=2026-10-19T00:00:00Z;linked=${VERSION}"></head><body>x</body></html>`;
+
+test("a pinned bundle's entry meta carries linked=<version>, equal to stamp.json and manifest.runtime", () => {
+  const { root } = runtimeRoot();
+  const pin = readRuntimePin(VERSION, root);
+  const { out, manifest } = bundle({ html: LINKED_PAGE, runtime: pin, linked: VERSION });
+  const { meta, pieces, stampJson, manifest: written } = linkedPieces(out);
+  assert.deepEqual(pieces, [`linked=${VERSION}`], meta);
+  assert.equal(stampJson.linked, VERSION);
+  assert.equal(written.runtime.version, VERSION);
+  assert.equal(manifest.runtime?.version, VERSION);
+  // The page still parses as a stamp and the entry digest covers the final bytes.
+  assert.equal(readStamp(NodeFs.readFileSync(NodePath.join(out, "index.html"), "utf8"))?.components, STAMP.components);
+  assert.equal(written.sha256, sha(NodeFs.readFileSync(NodePath.join(out, "index.html"))));
+});
+
+test("a linked bundle gets the meta piece even when the page had no stamp or an unlinked one", () => {
+  for (const html of [
+    "<!doctype html><html><head></head><body>x</body></html>",
+    `<!doctype html><html><head><meta name="nofun-artifact" content="components=${VERSION};lane=spec;theme=t3;at=2026-10-19T00:00:00Z"></head><body>x</body></html>`,
+  ]) {
+    const { root } = runtimeRoot();
+    const { out } = bundle({ html, runtime: readRuntimePin(VERSION, root), linked: VERSION.toUpperCase() });
+    assert.deepEqual(linkedPieces(out).pieces, [`linked=${VERSION}`]);
+  }
+});
+
+test("an unlinked bundle has no linked piece, and a runtime pin without a linked page is refused", () => {
+  const plain = bundle();
+  assert.deepEqual(linkedPieces(plain.out).pieces, []);
+  assert.equal("linked" in linkedPieces(plain.out).stampJson, false);
+  const { root } = runtimeRoot();
+  assert.throws(() => bundle({ runtime: readRuntimePin(VERSION, root) }), /needs a linked page/);
+  assert.throws(() => bundle({ linked: "" }), /linked runtime/);
+  assert.throws(() => bundle({ linked: "not hex!" }), /linked runtime/);
+});
+
+// End to end through the CLI: needs a clean nofun-components checkout at the pinned revision
+// (NOFUN_COMPONENTS_DIR), which CI does not have, so it only runs where one is provided.
+test(
+  "compile --linked on a spec card: entry meta, stamp.json and manifest.runtime agree",
+  { skip: process.env.NOFUN_COMPONENTS_DIR ? false : "set NOFUN_COMPONENTS_DIR to a pinned components checkout" },
+  () => {
+    const cli = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
+    const { root } = runtimeRoot("window.NoFunUI={}", "body{}");
+    const dir = NodeFs.mkdtempSync(NodePath.join(NodeOs.tmpdir(), "a16-spec-"));
+    const spec = NodePath.join(dir, "card.spec.json");
+    NodeFs.writeFileSync(
+      spec,
+      JSON.stringify({
+        title: "Gate progress",
+        root: { component: "Text", props: { text: "5/16 gates", variant: "title" } },
+      }),
+    );
+    const out = NodePath.join(dir, "out");
+    const run = spawnSync(
+      process.execPath,
+      ["--experimental-strip-types", cli, "compile", "--spec", spec, "--preset", "canvas-t3",
+        "--linked", "--runtime-sha", VERSION, "--out", out],
+      { encoding: "utf8", env: { ...process.env, NOFUN_UI_RUNTIME_ROOT: root } },
+    );
+    assert.equal(run.status, 0, run.stderr + run.stdout);
+    const { meta, pieces, stampJson, manifest } = linkedPieces(out);
+    assert.deepEqual(pieces, [`linked=${VERSION}`], meta);
+    assert.equal(stampJson.linked, VERSION);
+    assert.equal(manifest.runtime.version, VERSION);
+    assert.equal(manifest.runtime.sha256, readRuntimePin(VERSION, root).sha256);
+    assert.equal(manifest.sha256, sha(NodeFs.readFileSync(NodePath.join(out, "index.html"))));
+  },
+);
