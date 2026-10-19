@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import * as NodeFs from "node:fs";
 import * as NodePath from "node:path";
 
+import { assertRuntimePin, type RuntimePin } from "./runtime-pin.ts";
 import { formatStamp, type ArtifactStamp } from "./stamp.ts";
 
 export const CANVAS_FORMAT = "nofun-canvas-artifact-bundle";
@@ -21,6 +22,8 @@ export const MANIFEST_KEYS = [
   "createdAt",
   "sha256",
 ] as const;
+/** Optional keys; `runtime` pins the No Fun UI runtime the page was built for (see runtime-pin.ts). */
+export const OPTIONAL_MANIFEST_KEYS = ["runtime"] as const;
 
 const HEX_COLOR = /^#[0-9a-f]{6}$/;
 
@@ -145,6 +148,8 @@ export interface CanvasBundleInput {
   readonly sourceFile: { readonly name: string; readonly bytes: Buffer };
   /** Optional `stamp.json` `linked` value. Omitted when unset. */
   readonly linked?: string;
+  /** Runtime version and digest written to `manifest.runtime`. Omitted for unpinned (legacy) bundles. */
+  readonly runtime?: RuntimePin;
   /** Stage images copied under `assets/`. Paths must stay inside that directory. */
   readonly assets?: ReadonlyArray<{ readonly bundlePath: string; readonly bytes: Buffer }>;
 }
@@ -160,6 +165,7 @@ export interface CanvasManifest {
   readonly source: { readonly kind: "nofun-artifact-render"; readonly ref: string };
   readonly createdAt: string;
   readonly sha256: string;
+  readonly runtime?: RuntimePin;
 }
 
 /** Writes a Canvas bundle. Returns the manifest that was written. */
@@ -195,6 +201,12 @@ export function writeCanvasBundle(input: CanvasBundleInput): CanvasManifest {
     at,
   };
   if (input.linked) stampFile.linked = input.linked;
+  const runtime = input.runtime ? assertRuntimePin(input.runtime) : undefined;
+  if (runtime && input.linked && input.linked.toLowerCase() !== runtime.version) {
+    throw new Error(
+      `runtime pin ${runtime.version} disagrees with the linked runtime ${input.linked}.`,
+    );
+  }
   const sourceMeta: { kind: ArtifactStamp["lane"]; file: string; theme?: string } = {
     kind: stamp.lane,
     file: sourceName,
@@ -214,6 +226,7 @@ export function writeCanvasBundle(input: CanvasBundleInput): CanvasManifest {
     },
     createdAt: at,
     sha256,
+    ...(runtime ? { runtime } : {}),
   };
   NodeFs.mkdirSync(outDir, { recursive: true });
   writeRegular(NodePath.join(outDir, "index.html"), html);

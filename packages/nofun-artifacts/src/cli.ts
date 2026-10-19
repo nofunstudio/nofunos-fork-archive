@@ -10,6 +10,7 @@ import { compileLinked } from "./linked.ts";
 import { inlineStageAssets, stageAssets } from "./live/assets.ts";
 import { closeProbe } from "./live/probe.ts";
 import { componentsCommit } from "./live/source.ts";
+import { findRuntimePin, readRuntimePin, type RuntimePin } from "./runtime-pin.ts";
 import { canvasPreset, withPresetCss, withPresetDefaults } from "./presets.ts";
 import {
   compilerVersion,
@@ -183,6 +184,20 @@ async function compile(argv: readonly string[]): Promise<void> {
   if (!stamp) throw new Error("Compiled HTML is missing the nofun-artifact stamp.");
   let html = preset ? withPresetCss(compiled.html, preset) : compiled.html;
   if (staged) html = inlineStageAssets(html, staged.files);
+  // A-G1: the manifest pins the runtime. A linked page names its runtime folder and must find it;
+  // an inline page carries its own copy of the code, so it pins the runtime of its components
+  // revision when that runtime is built, and says so when it is not.
+  let runtime: RuntimePin | undefined;
+  if (flags.linked) {
+    runtime = readRuntimePin(flags.runtimeSha!);
+  } else {
+    runtime = findRuntimePin(stamp.components.slice(0, 12));
+    if (!runtime) {
+      console.warn(
+        `no built runtime for components ${stamp.components.slice(0, 12)}; the manifest carries no runtime pin`,
+      );
+    }
+  }
   const manifest = writeCanvasBundle({
     outDir: flags.out,
     html,
@@ -191,6 +206,7 @@ async function compile(argv: readonly string[]): Promise<void> {
     background,
     stamp,
     ...(flags.runtimeSha ? { linked: flags.runtimeSha } : {}),
+    ...(runtime ? { runtime } : {}),
     ...(staged && staged.files.length > 0 ? { assets: staged.files } : {}),
     sourceFile: { name: NodePath.basename(file), bytes },
   });

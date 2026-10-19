@@ -41,6 +41,14 @@ const frameCss = (selection: string, extra = "") =>
     extra,
   ].join("");
 
+// A1-4: Canvas boards ban blue. The `t3` theme points the No Fun tokens at the variables the reader's
+// T3 app injects, and T3's own primary, ring and focus are blue (#346bf1), as is the Status "info"
+// tone. A Canvas bundle must not inherit them: ink, gray rings and a gray info tone instead.
+// Specificity (0,1,1) beats the `:root` and `.dark` definitions in runtime.css and the host sheet.
+export const NO_BLUE_T3_CSS =
+  `body[data-nf-theme="t3"]{--primary:var(--foreground);--primary-foreground:var(--background);` +
+  `--ring:var(--muted-foreground);--nf-focus:var(--muted-foreground);--info:var(--muted-foreground)}`;
+
 export const PRESETS = {
   /** No Fun's quiet stock system: ink on near-black, gray hairlines. The default for data. */
   "canvas-dark-kobra": {
@@ -72,7 +80,7 @@ export const PRESETS = {
     typeScale: TYPE_SCALE,
     css: frameCss(
       "color-mix(in oklab, var(--foreground) 24%, transparent)",
-      `body[data-nf-theme="t3"]{padding:16px}`,
+      `body[data-nf-theme="t3"]{padding:16px}${NO_BLUE_T3_CSS}`,
     ),
   },
 } as const satisfies Record<string, CanvasPreset>;
