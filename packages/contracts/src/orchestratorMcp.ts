@@ -216,6 +216,19 @@ export const OrchestratorMcpRequiredContextEntry = Schema.Struct({
 export type OrchestratorMcpRequiredContextEntry = typeof OrchestratorMcpRequiredContextEntry.Type;
 
 export const OrchestratorMcpDelegateTaskInput = Schema.Struct({
+  mission: Schema.optional(
+    Schema.Struct({
+      missionId: TrimmedNonEmptyString,
+      taskId: TrimmedNonEmptyString,
+      attemptKey: Schema.Struct({
+        attemptNumber: PositiveInt,
+        operation: Schema.Literals(["read", "test", "write"]),
+      }),
+    }),
+  ).annotate({
+    description:
+      "Canonical mission/task and attempt identity. The server supplies all authority and admission facts. Missing authority denies the call before any child or worktree is created.",
+  }),
   task: OrchestratorMcpPrompt.annotate({
     description: "Self-contained task for one delegated child agent/subagent.",
   }),

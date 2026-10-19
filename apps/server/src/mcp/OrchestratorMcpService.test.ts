@@ -8,6 +8,8 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import {
   EnvironmentId,
+  OrchestratorMcpDelegateTaskInput,
+  OrchestratorMcpFailure,
   NodeId,
   ProjectId,
   ProviderDriverKind,
@@ -24,6 +26,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
 import { afterAll } from "vite-plus/test";
 
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
@@ -1306,6 +1309,146 @@ describe("OrchestratorMcpService provider resolution", () => {
         }
       }),
   );
+  describe("delegate_task mission admission", () => {
+    const scratch: Array<string> = [];
+    afterAll(() => {
+      for (const path of scratch) NodeFS.rmSync(path, { recursive: true, force: true });
+    });
+    const encodeFailure = Schema.encodeEffect(Schema.fromJsonString(OrchestratorMcpFailure));
+    const decodeFailureWire = Schema.decodeUnknownEffect(
+      Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
+    );
+    const decodeInput = Schema.decodeUnknownEffect(OrchestratorMcpDelegateTaskInput);
+    const decodeInputJson = Schema.decodeUnknownEffect(
+      Schema.fromJsonString(OrchestratorMcpDelegateTaskInput),
+    );
+    const encodeInputJson = Schema.encodeEffect(
+      Schema.fromJsonString(OrchestratorMcpDelegateTaskInput),
+    );
+    const missionInput = {
+      missionId: "mission:mcp-admission",
+      taskId: "task:mcp-admission",
+      attemptKey: { attemptNumber: 1, operation: "write" },
+    } as const;
+
+    it.effect("preserves the canonical attempt identity at the public boundary", () =>
+      Effect.gen(function* () {
+        const decoded = yield* decodeInput({
+          task: "Implement the mission task.",
+          mission: missionInput,
+        });
+        assert.deepInclude(decoded, { mission: missionInput });
+      }),
+    );
+
+    it.effect(
+      "rejects invalid attempt identities instead of treating them as ordinary delegation",
+      () =>
+        Effect.gen(function* () {
+          for (const attemptKey of [
+            { attemptNumber: 0, operation: "write" },
+            { attemptNumber: 1.5, operation: "read" },
+            { attemptNumber: 1, operation: "launch" },
+            "attempt-1",
+          ]) {
+            yield* decodeInput({
+              task: "Implement the mission task.",
+              mission: { ...missionInput, attemptKey },
+            }).pipe(Effect.flip);
+          }
+        }),
+    );
+
+    it.effect("leaves ordinary input encoding unchanged when mission is omitted", () =>
+      Effect.gen(function* () {
+        const decoded = yield* decodeInputJson(
+          '{"task":"Review the change.","clientRequestId":"ordinary-call"}',
+        );
+        assert.equal(
+          yield* encodeInputJson(decoded),
+          '{"task":"Review the change.","clientRequestId":"ordinary-call"}',
+        );
+      }),
+    );
+
+    it.effect(
+      "refuses an unconfigured mission before preparing a worktree or dispatching a child",
+      () =>
+        Effect.gen(function* () {
+          const input = yield* decodeInput({
+            task: "Implement the mission task.",
+            mission: missionInput,
+            clientRequestId: "mission-denied",
+            workspace: { strategy: "worktree" },
+          });
+          const directory = NodeFS.mkdtempSync(
+            NodePath.join(NodeOS.tmpdir(), "mcp-mission-admission-"),
+          );
+          scratch.push(directory);
+          const worktreePath = NodePath.join(directory, "child");
+          let worktrees = 0;
+          let dispatches = 0;
+          const dependencies = Layer.mergeAll(
+            NodeServices.layer,
+            Layer.mock(ThreadManagementService.ThreadManagementService)({
+              getThreadRecords: () => Effect.succeed(parentProjection([])),
+              dispatch: () =>
+                Effect.sync(() => {
+                  dispatches += 1;
+                  return { sequence: 0, storedEvents: [] } as never;
+                }),
+            }),
+            providerRegistryLayer([
+              providerSnapshot({
+                instanceId: codexInstanceId,
+                driver: ProviderDriverKind.make("codex"),
+                model: "gpt-5.4",
+              }),
+            ]),
+            adapterRegistryLayer([codexInstanceId]),
+            Layer.mock(ProjectService.ProjectService)({
+              getById: () =>
+                Effect.succeed(
+                  Option.some({ id: projectId, workspaceRoot: "/tmp/mission" } as never),
+                ),
+            }),
+            Layer.mock(SecretRequests.SecretRequests)({}),
+            Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+          );
+          const error = yield* Effect.gen(function* () {
+            const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+            return yield* service
+              .delegateTask(
+                { ...scope, capabilities: new Set(["orchestration", "worktree"]) },
+                input,
+              )
+              .pipe(Effect.flip);
+          }).pipe(
+            Effect.provide(OrchestratorMcpService.layer.pipe(Layer.provide(dependencies))),
+            Effect.provideService(GitWorkflowService.GitWorkflowService, {
+              listRefs: () => Effect.succeed({ refs: [] } as never),
+              localStatus: () => Effect.succeed({ refName: "main" } as never),
+              createWorktree: () =>
+                Effect.sync(() => {
+                  worktrees += 1;
+                  NodeFS.mkdirSync(worktreePath);
+                  return {
+                    worktree: { refName: "mission-child", path: worktreePath },
+                  } as never;
+                }),
+            } as never),
+          );
+          assert.equal(dispatches, 0);
+          assert.equal(worktrees, 0);
+          assert.isFalse(NodeFS.existsSync(worktreePath));
+          const wire = yield* decodeFailureWire(yield* encodeFailure(error));
+          assert.equal(wire.code, "orchestration_error");
+          assert.notProperty(wire, "stack");
+          assert.equal(error.code, "orchestration_error");
+          assert.include(error.message, "not configured");
+        }),
+    );
+  });
   describe("required context", () => {
     const claudeInstanceId = ProviderInstanceId.make("claudeAgent");
     const cursorInstanceId = ProviderInstanceId.make("cursor");

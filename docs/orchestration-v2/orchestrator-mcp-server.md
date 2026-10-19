@@ -198,6 +198,18 @@ Returns:
 Unavailable providers include model-visible constraints such as missing V2
 adapter support, disabled state, missing executable, or missing authentication.
 
+### Mission-admitted delegation
+
+`delegate_task` accepts `mission: {missionId, taskId, attemptKey:
+{attemptNumber, operation}}`, where `operation` is `read`, `test`, or `write`.
+The attempt key uses the canonical admission identity; a client request id
+cannot authorize another attempt. Omit `mission` for ordinary delegation.
+
+Mission calls stay denied before creating a worktree or child when trusted
+admission authority is unavailable. The current canonical task/provider
+contracts do not yet retain the scope and attestation required for healthy
+admission; supplying a mission selector does not bypass that refusal.
+
 ### `delegate_task`
 
 Creates a T3-owned child thread and immediately dispatches the supplied task
