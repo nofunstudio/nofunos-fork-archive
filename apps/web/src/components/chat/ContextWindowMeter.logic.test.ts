@@ -8,6 +8,7 @@ import {
   formatContextWindowCost,
   resolveContextWindowModelDisplayName,
   shouldOfferResumeCompaction,
+  shouldReserveContextWindowMeter,
 } from "./ContextWindowMeter.logic";
 
 function claudeProvider(input: {
@@ -120,15 +121,22 @@ describe("resolveContextWindowModelDisplayName", () => {
 });
 
 describe("formatContextWindowCompactionMessage", () => {
-  it.each([undefined, null, 0, -1, Number.NaN, Number.POSITIVE_INFINITY])(
-    "does not invent a native policy for %s",
-    (threshold) => {
-      expect(formatContextWindowCompactionMessage(threshold)).toBe("Native policy not reported");
-    },
-  );
+  it("describes compaction in terms of the selected model", () => {
+    expect(formatContextWindowCompactionMessage("GPT-5.6 Sol")).toBe(
+      "Context for GPT-5.6 Sol compacts automatically when needed.",
+    );
+  });
 
-  it("shows the reported auto-compaction target", () => {
-    expect(formatContextWindowCompactionMessage(400_000)).toBe("Auto target: 400k");
+  it("uses neutral copy when the model is unavailable", () => {
+    expect(formatContextWindowCompactionMessage(null)).toBe(
+      "Context compacts automatically when needed.",
+    );
+  });
+
+  it("shows the configured auto-compaction threshold", () => {
+    expect(formatContextWindowCompactionMessage("Claude Sonnet 5", 300_000)).toBe(
+      "Compacts automatically at 300,000 tokens.",
+    );
   });
 });
 
@@ -163,6 +171,19 @@ describe("shouldOfferResumeCompaction", () => {
         now,
       }),
     ).toBe(false);
+  });
+
+  it("uses the reported prompt cache TTL instead of the fallback", () => {
+    const offer = (updatedAt: string) =>
+      shouldOfferResumeCompaction({
+        provider: "claudeAgent",
+        usedTokens: 200_000,
+        updatedAt,
+        promptCacheTtlMs: 5 * 60_000,
+        now,
+      });
+    expect(offer("2026-08-24T11:55:00.000Z")).toBe(true);
+    expect(offer("2026-08-24T11:56:00.000Z")).toBe(false);
   });
 
   it("does not show Claude's resume prompt for another provider", () => {
@@ -228,6 +249,55 @@ describe("hasDismissedResumeCompaction", () => {
         { kind: "user-input.resolved", payload: { answers: ["Don't ask again"] } },
       ]),
     ).toBe(false);
+  });
+});
+
+describe("shouldReserveContextWindowMeter", () => {
+  const loadingStartedThread = {
+    meterEnabled: true,
+    detailLoading: true,
+    threadStarted: true,
+    providerReportsContextWindow: true,
+  };
+
+  it("holds the meter's slot while a started thread's detail loads", () => {
+    expect(shouldReserveContextWindowMeter(loadingStartedThread)).toBe(true);
+  });
+
+  it("reserves nothing once the detail is in", () => {
+    expect(shouldReserveContextWindowMeter({ ...loadingStartedThread, detailLoading: false })).toBe(
+      false,
+    );
+  });
+
+  it("reserves nothing for a thread that never ran a turn", () => {
+    expect(shouldReserveContextWindowMeter({ ...loadingStartedThread, threadStarted: false })).toBe(
+      false,
+    );
+  });
+
+  it("reserves while the thread's provider is not in the catalog yet", () => {
+    expect(
+      shouldReserveContextWindowMeter({
+        ...loadingStartedThread,
+        providerReportsContextWindow: null,
+      }),
+    ).toBe(true);
+  });
+
+  it("reserves nothing for a provider that does not stream usage", () => {
+    expect(
+      shouldReserveContextWindowMeter({
+        ...loadingStartedThread,
+        providerReportsContextWindow: false,
+      }),
+    ).toBe(false);
+  });
+
+  it("reserves nothing while the meter is switched off", () => {
+    expect(shouldReserveContextWindowMeter({ ...loadingStartedThread, meterEnabled: false })).toBe(
+      false,
+    );
   });
 });
 

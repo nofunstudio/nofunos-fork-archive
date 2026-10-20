@@ -1,6 +1,8 @@
 import type {
+  OrchestrationV2ProviderTurn,
   OrchestrationV2ProviderTurnTokenUsage,
   OrchestrationV2ProviderThread,
+  OrchestrationV2ThreadProjection,
   OrchestrationV2TurnItem,
   ThreadTokenUsageSnapshot,
 } from "@t3tools/contracts";
@@ -21,11 +23,39 @@ export type ContextWindowSnapshot = NullableContextWindowUsage & {
   readonly usedPercentage: number | null;
   readonly remainingPercentage: number | null;
   readonly updatedAt: string;
-  /** Only populated when the provider supplies a usage sample timestamp. */
-  readonly sampledAt: string | null;
 };
 
-/** Prefers the provider's live usage report (#8144); falls back to the last compaction item. */
+/** Newest usage report across a thread's provider turns. Snapshots order turns
+    by provider thread, not time, so pick by timestamp. */
+export function latestProviderTurnTokenUsage(
+  turns: ReadonlyArray<Pick<OrchestrationV2ProviderTurn, "tokenUsage">>,
+  projection?: Pick<OrchestrationV2ThreadProjection, "thread" | "contextTransfers"> | null,
+  providerThread?: Pick<OrchestrationV2ProviderThread, "contextUsage"> | null,
+): OrchestrationV2ProviderTurnTokenUsage | null {
+  let latest: OrchestrationV2ProviderTurnTokenUsage | null = null;
+  for (const { tokenUsage } of turns) {
+    if (tokenUsage === undefined) continue;
+    // Ties go to the later entry, since live upserts append.
+    if (latest === null || Date.parse(tokenUsage.updatedAt) >= Date.parse(latest.updatedAt)) {
+      latest = tokenUsage;
+    }
+  }
+  if (latest !== null || projection == null || providerThread?.contextUsage != null) return latest;
+  const forkedFrom = projection.thread.forkedFrom;
+  if (forkedFrom?.type !== "run") return null;
+  return (
+    projection.contextTransfers.find(
+      (transfer) =>
+        transfer.type === "fork" &&
+        transfer.targetThreadId === projection.thread.id &&
+        transfer.sourceThreadId === forkedFrom.threadId &&
+        transfer.sourcePoint.runId === forkedFrom.runId &&
+        transfer.sourceProviderInstanceId === projection.thread.modelSelection.instanceId &&
+        (transfer.status === "pending" || transfer.resolution?.strategy === "native_fork"),
+    )?.sourceTokenUsage ?? null
+  );
+}
+
 export function deriveLatestContextWindowSnapshot(
   entries: ReadonlyArray<{
     readonly item: OrchestrationV2TurnItem;
@@ -59,11 +89,10 @@ export function deriveLatestContextWindowSnapshot(
       lastReasoningOutputTokens: null,
       toolUses: null,
       durationMs: null,
-      compactsAutomatically: null,
+      compactsAutomatically: true,
       autoCompactThreshold: null,
       cost: null,
       updatedAt: liveUsage.updatedAt,
-      sampledAt: liveUsage.updatedAt,
     };
   }
   const providerUsage = providerThread?.contextUsage;
@@ -99,7 +128,6 @@ export function deriveLatestContextWindowSnapshot(
       cost: providerUsage.cost ?? null,
       autoCompactThreshold: providerUsage.autoCompactThreshold ?? null,
       updatedAt: DateTime.formatIso(providerUsageUpdatedAt),
-      sampledAt: null,
     };
   }
   for (let index = entries.length - 1; index >= 0; index -= 1) {
@@ -138,33 +166,19 @@ export function deriveLatestContextWindowSnapshot(
       lastReasoningOutputTokens: null,
       toolUses: null,
       durationMs: null,
-      compactsAutomatically: null,
+      compactsAutomatically: true,
       autoCompactThreshold: null,
       cost: null,
       updatedAt: DateTime.formatIso(payload.startedAt ?? payload.updatedAt),
-      sampledAt: null,
     };
   }
 
   return null;
 }
 
-/**
- * Compaction can clear or replace the live report before the next sample.
- * Hold the previous reading until that sample arrives.
- */
-export function retainContextWindowSnapshotWhileCompacting<
-  T extends { readonly sampledAt: string | null },
->(held: T | null, next: T | null): T | null {
-  if (next?.sampledAt && next.sampledAt !== held?.sampledAt) {
-    return next;
-  }
-  return held;
-}
-
 export function formatContextWindowTokens(value: number | null): string {
   if (value === null || !Number.isFinite(value)) {
-    return "—";
+    return "0";
   }
   if (value < 1_000) {
     return `${Math.round(value)}`;
@@ -172,7 +186,7 @@ export function formatContextWindowTokens(value: number | null): string {
   if (value < 10_000) {
     return `${(value / 1_000).toFixed(1).replace(/\.0$/, "")}k`;
   }
-  if (value < 1_000_000) {
+  if (value < 999_500) {
     return `${Math.round(value / 1_000)}k`;
   }
   return `${(value / 1_000_000).toFixed(1).replace(/\.0$/, "")}m`;

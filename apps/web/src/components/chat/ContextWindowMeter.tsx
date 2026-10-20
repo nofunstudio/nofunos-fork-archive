@@ -8,9 +8,9 @@ import {
 import { Minimize2Icon } from "lucide-react";
 import { composerFloatingLayerProps } from "./composerEventScope";
 
-function formatPercentage(value: number | null | undefined): string {
-  if (value == null || !Number.isFinite(value)) {
-    return "—";
+function formatPercentage(value: number | null): string | null {
+  if (value === null || !Number.isFinite(value)) {
+    return null;
   }
   if (value < 10) {
     return `${value.toFixed(1).replace(/\.0$/, "")}%`;
@@ -19,29 +19,19 @@ function formatPercentage(value: number | null | undefined): string {
 }
 
 export function ContextWindowMeter(props: {
-  usage: ContextWindowSnapshot | null;
-  providerDisplayName?: string | null;
+  usage: ContextWindowSnapshot;
   modelDisplayName?: string | null;
   onCompact?: (() => void) | undefined;
   compactDisabled?: boolean | undefined;
   compactDisabledReason?: string | null | undefined;
 }) {
-  const {
-    usage,
-    modelDisplayName,
-    providerDisplayName,
-    onCompact,
-    compactDisabled,
-    compactDisabledReason,
-  } = props;
-  const reportedPercentage = usage?.usedPercentage;
-  const percentageKnown = reportedPercentage != null && Number.isFinite(reportedPercentage);
-  const usedPercentage = formatPercentage(reportedPercentage);
-  const normalizedPercentage = percentageKnown ? Math.max(0, Math.min(100, reportedPercentage)) : 0;
+  const { usage, modelDisplayName, onCompact, compactDisabled, compactDisabledReason } = props;
+  const usedPercentage = formatPercentage(usage.usedPercentage);
+  const normalizedPercentage = Math.max(0, Math.min(100, usage.usedPercentage ?? 0));
   const radius = 9.75;
   const circumference = 2 * Math.PI * radius;
   const dashOffset = circumference * (1 - normalizedPercentage / 100);
-  const totalProcessedTokens = usage?.totalProcessedTokens ?? null;
+  const totalProcessedTokens = usage.totalProcessedTokens ?? null;
   const showTotalProcessed = totalProcessedTokens !== null && totalProcessedTokens > 0;
   const isOverloaded = normalizedPercentage > 90;
   const usageColor = isOverloaded
@@ -56,19 +46,16 @@ export function ContextWindowMeter(props: {
         closeDelay={onCompact ? 150 : 0}
         render={
           <Button
-            size="sm"
+            size="icon-sm"
             variant="ghost-muted"
-            className="w-20"
-            data-context-window-meter="true"
+            className="size-7"
             aria-label={
-              usage?.usedPercentage != null
+              usage.maxTokens !== null && usedPercentage
                 ? `Context window ${usedPercentage} used`
-                : usage
-                  ? `Context window ${formatContextWindowTokens(usage.usedTokens)} tokens used; percentage unknown`
-                  : "Context window usage unknown"
+                : `Context window ${formatContextWindowTokens(usage.usedTokens)} tokens used`
             }
           >
-            <span className="relative flex size-5 shrink-0 items-center justify-center">
+            <span className="relative flex size-5 items-center justify-center">
               <svg
                 viewBox="0 0 24 24"
                 className="-rotate-90 absolute inset-0 size-full transform-gpu mx-0!"
@@ -79,29 +66,23 @@ export function ContextWindowMeter(props: {
                   cy="12"
                   r={radius}
                   fill="none"
-                  className={
-                    percentageKnown ? "stroke-muted-foreground/24" : "stroke-muted-foreground/55"
-                  }
+                  className="stroke-muted-foreground/24"
                   strokeWidth="3"
-                  strokeDasharray={percentageKnown ? undefined : "1.6 2.4"}
                 />
-                {percentageKnown ? (
-                  <circle
-                    cx="12"
-                    cy="12"
-                    r={radius}
-                    fill="none"
-                    stroke={usageColor}
-                    strokeWidth="3"
-                    strokeLinecap="round"
-                    strokeDasharray={circumference}
-                    strokeDashoffset={dashOffset}
-                    className="transition-[stroke-dashoffset,stroke] duration-500 ease-out motion-reduce:transition-none"
-                  />
-                ) : null}
+                <circle
+                  cx="12"
+                  cy="12"
+                  r={radius}
+                  fill="none"
+                  stroke={usageColor}
+                  strokeWidth="3"
+                  strokeLinecap="round"
+                  strokeDasharray={circumference}
+                  strokeDashoffset={dashOffset}
+                  className="transition-[stroke-dashoffset,stroke] duration-500 ease-out motion-reduce:transition-none"
+                />
               </svg>
             </span>
-            <span className="w-8 text-right text-2xs tabular-nums">{usedPercentage}</span>
           </Button>
         }
       />
@@ -117,22 +98,22 @@ export function ContextWindowMeter(props: {
         <div className="flex flex-col gap-2 p-(--floating-content-inset)">
           <div className="flex items-center justify-between gap-3">
             <div className="font-medium text-muted-foreground text-xs">Context Window</div>
-            {usage?.usedPercentage != null ? (
+            {usage.maxTokens !== null && usedPercentage ? (
               <div className="text-secondary-label text-2xs tabular-nums">
                 <span>{usedPercentage}</span>
                 <span className="mx-1">·</span>
                 <span>
-                  {formatContextWindowTokens(usage?.usedTokens ?? null)}/
-                  {formatContextWindowTokens(usage?.maxTokens ?? null)}
+                  {formatContextWindowTokens(usage.usedTokens)}/
+                  {formatContextWindowTokens(usage.maxTokens ?? null)}
                 </span>
               </div>
             ) : (
               <div className="text-secondary-label text-2xs tabular-nums">
-                {formatContextWindowTokens(usage?.usedTokens ?? null)}
+                {formatContextWindowTokens(usage.usedTokens)}
               </div>
             )}
           </div>
-          {usage?.usedPercentage != null ? (
+          {usage.maxTokens !== null ? (
             <div
               className="h-1.5 w-full overflow-hidden rounded-full bg-muted/60"
               role="progressbar"
@@ -155,53 +136,31 @@ export function ContextWindowMeter(props: {
               </span>
             </div>
           ) : null}
-          {usage?.cost != null ? (
+          {usage.cost != null ? (
             <div className="flex items-center justify-between gap-3 text-2xs leading-4">
               <span className="text-secondary-label">Cost</span>
               <span className="font-medium tabular-nums text-secondary-label">
-                {formatContextWindowCost(usage?.cost)}
+                {formatContextWindowCost(usage.cost)}
               </span>
             </div>
           ) : null}
-          {!usage ? (
-            <div className="text-secondary-label text-2xs">
-              Usage not reported by this provider.
+          {usage.compactsAutomatically ? (
+            <div className="mt-1 text-pretty text-secondary-label text-2xs font-medium">
+              {formatContextWindowCompactionMessage(modelDisplayName, usage.autoCompactThreshold)}
             </div>
           ) : null}
-          {providerDisplayName ? (
-            <div className="text-secondary-label text-2xs">
-              Compacting with {providerDisplayName}
-            </div>
-          ) : null}
-          {modelDisplayName ? (
-            <div className="text-secondary-label text-2xs">{modelDisplayName}</div>
-          ) : null}
-          {usage?.sampledAt ? (
-            <div className="text-secondary-label text-2xs">
-              Last usage sample:{" "}
-              <time dateTime={usage.sampledAt}>{new Date(usage.sampledAt).toLocaleString()}</time>
-            </div>
-          ) : null}
-          <div className="mt-1 text-pretty text-secondary-label text-2xs font-medium">
-            {formatContextWindowCompactionMessage(usage?.autoCompactThreshold)}
-          </div>
           {onCompact ? (
             <>
               <Button
                 size="xs"
                 variant="outline"
-                className="mt-1 w-full"
+                className="mt-1 w-full justify-center"
                 disabled={compactDisabled}
-                onClick={() => {
-                  if (!compactDisabled) onCompact();
-                }}
+                onClick={onCompact}
               >
                 <Minimize2Icon aria-hidden="true" />
                 Compact context
               </Button>
-              <div className="text-pretty text-secondary-label text-2xs">
-                Your draft and attachments stay here. Older details can be lost in a summary.
-              </div>
               {compactDisabled && compactDisabledReason ? (
                 <div className="text-pretty text-secondary-label text-2xs">
                   {compactDisabledReason}
@@ -213,4 +172,8 @@ export function ContextWindowMeter(props: {
       </PopoverPopup>
     </Popover>
   );
+}
+
+export function ContextWindowMeterPlaceholder() {
+  return <span aria-hidden="true" className="size-7 shrink-0" />;
 }
