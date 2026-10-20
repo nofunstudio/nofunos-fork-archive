@@ -142,6 +142,7 @@ interface TestProviderRuntimeState {
   readonly closeCount: number;
   readonly interruptCount: number;
   readonly resumeCount: number;
+  readonly steerCount: number;
   readonly unloadedNativeThreadIds: ReadonlyArray<string>;
   readonly eventQueues: ReadonlyMap<string, Queue.Queue<ProviderAdapterV2Event, Cause.Done>>;
 }
@@ -151,6 +152,7 @@ const emptyState: TestProviderRuntimeState = {
   closeCount: 0,
   interruptCount: 0,
   resumeCount: 0,
+  steerCount: 0,
   unloadedNativeThreadIds: [],
   eventQueues: new Map(),
 };
@@ -366,7 +368,11 @@ function makeProviderAdapter(
               resumeCount: current.resumeCount + 1,
             })).pipe(Effect.as(threadInput.providerThread)),
           startTurn: () => Effect.void,
-          steerTurn: () => Effect.void,
+          steerTurn: () =>
+            Ref.update(state, (current) => ({
+              ...current,
+              steerCount: current.steerCount + 1,
+            })),
           interruptTurn: () =>
             Ref.update(state, (current) => ({
               ...current,
@@ -3685,6 +3691,191 @@ it.effect(
         // that resume reloads the thread instead of reusing torn-down state.
         assert.equal(resumesBeforeUnload, 1);
         assert.equal((yield* Ref.get(state)).resumeCount, 2);
+        assert.deepEqual((yield* Ref.get(state)).unloadedNativeThreadIds, ["native-thread"]);
+        assert.isTrue(Option.isSome(yield* manager.get(settled.providerSessionId)));
+      });
+
+      yield* effect.pipe(
+        Effect.provide(
+          layerTest({ state, idleTimeoutMs: 60_000, threadIdleUnloadMs: 1000, beforeUnload }),
+        ),
+        Effect.scoped,
+      );
+    }),
+);
+
+it.effect(
+  "ProviderSessionManagerV2 cancels a pending thread idle unload when its session releases",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const effect = Effect.gen(function* () {
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const settled = yield* settleSharedThread({
+          fixtureName: "provider-session-manager-thread-idle-release-before-expiry",
+          state,
+        });
+        yield* TestClock.adjust("500 millis");
+        yield* Effect.yieldNow;
+        assert.deepEqual((yield* Ref.get(state)).unloadedNativeThreadIds, []);
+        yield* manager.release({
+          providerSessionId: settled.providerSessionId,
+          reason: "manual_shutdown",
+        });
+        assert.isTrue(Option.isNone(yield* manager.get(settled.providerSessionId)));
+        // The armed timer must not fire after its session is gone.
+        yield* TestClock.adjust("10 seconds");
+        yield* Effect.yieldNow;
+        assert.deepEqual((yield* Ref.get(state)).unloadedNativeThreadIds, []);
+        assert.equal((yield* Ref.get(state)).closeCount, 1);
+      });
+
+      yield* effect.pipe(
+        Effect.provide(layerTest({ state, idleTimeoutMs: 60_000, threadIdleUnloadMs: 1000 })),
+      );
+    }),
+);
+
+it.effect(
+  "ProviderSessionManagerV2 interrupts a parked thread idle unload when its session releases",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const unloadStarted = yield* Deferred.make<void>();
+      const releaseUnload = yield* Deferred.make<void>();
+      const beforeUnload = Effect.gen(function* () {
+        yield* Deferred.succeed(unloadStarted, undefined);
+        yield* Deferred.await(releaseUnload);
+      });
+      const effect = Effect.gen(function* () {
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const settled = yield* settleSharedThread({
+          fixtureName: "provider-session-manager-thread-idle-release-parked",
+          state,
+        });
+        yield* TestClock.adjust("10 seconds");
+        yield* Effect.yieldNow;
+        // Same bounded park wait as the turn-start race test below.
+        yield* Effect.gen(function* () {
+          let steps = 0;
+          while (Option.isNone(yield* Deferred.poll(unloadStarted)) && steps < 8) {
+            yield* TestClock.adjust("500 millis");
+            yield* Effect.yieldNow;
+            steps += 1;
+          }
+        });
+        assert.isTrue(Option.isSome(yield* Deferred.poll(unloadStarted)));
+        const releaseDone = yield* Deferred.make<void>();
+        const release = yield* manager
+          .release({
+            providerSessionId: settled.providerSessionId,
+            reason: "manual_shutdown",
+          })
+          .pipe(Effect.andThen(Deferred.succeed(releaseDone, undefined)), Effect.forkScoped);
+        // The release interrupts the parked unload instead of hanging
+        // behind it (or leaving it behind) while the runtime closes.
+        yield* Effect.gen(function* () {
+          let steps = 0;
+          while (Option.isNone(yield* Deferred.poll(releaseDone)) && steps < 20) {
+            yield* Effect.yieldNow;
+            steps += 1;
+          }
+        });
+        assert.isTrue(Option.isSome(yield* Deferred.poll(releaseDone)));
+        yield* Fiber.join(release);
+        assert.isTrue(Option.isNone(yield* manager.get(settled.providerSessionId)));
+        assert.equal((yield* Ref.get(state)).closeCount, 1);
+        // The interrupted unload never reached the adapter, and nothing
+        // refires after it: opening the gate resumes nothing.
+        yield* Deferred.succeed(releaseUnload, undefined);
+        yield* TestClock.adjust("10 seconds");
+        yield* Effect.yieldNow;
+        yield* Effect.yieldNow;
+        assert.deepEqual((yield* Ref.get(state)).unloadedNativeThreadIds, []);
+      });
+
+      yield* effect.pipe(
+        Effect.provide(
+          layerTest({ state, idleTimeoutMs: 60_000, threadIdleUnloadMs: 1000, beforeUnload }),
+        ),
+        Effect.scoped,
+      );
+    }),
+);
+
+it.effect(
+  "ProviderSessionManagerV2 serializes steer against a parked idle unload and reloads",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const unloadStarted = yield* Deferred.make<void>();
+      const releaseUnload = yield* Deferred.make<void>();
+      // Adapter calls the unload had served when it actually reached it.
+      let resumesBeforeUnload: number | undefined;
+      let steersBeforeUnload: number | undefined;
+      const beforeUnload = Effect.gen(function* () {
+        yield* Deferred.succeed(unloadStarted, undefined);
+        yield* Deferred.await(releaseUnload);
+        const current = yield* Ref.get(state);
+        resumesBeforeUnload = current.resumeCount;
+        steersBeforeUnload = current.steerCount;
+      });
+      const effect = Effect.gen(function* () {
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const settled = yield* settleSharedThread({
+          fixtureName: "provider-session-manager-thread-idle-steer",
+          state,
+        });
+        yield* TestClock.adjust("10 seconds");
+        yield* Effect.yieldNow;
+        // Same bounded park wait as the turn-start race test below.
+        yield* Effect.gen(function* () {
+          let steps = 0;
+          while (Option.isNone(yield* Deferred.poll(unloadStarted)) && steps < 8) {
+            yield* TestClock.adjust("500 millis");
+            yield* Effect.yieldNow;
+            steps += 1;
+          }
+        });
+        assert.isTrue(Option.isSome(yield* Deferred.poll(unloadStarted)));
+        // A steer arrives while the unload is parked. Serialized, it waits
+        // for the unload, reloads the cleared thread, then steers; unfixed,
+        // it would steer torn-down native state concurrently.
+        const steerDone = yield* Deferred.make<void>();
+        const steered = yield* settled.runtime
+          .steerTurn({
+            threadId: settled.threadId,
+            runId: idAllocator.derive.run({ threadId: settled.threadId, ordinal: 1 }),
+            providerThread: settled.providerThread,
+            providerTurnId: idAllocator.derive.providerTurn({
+              driver: CODEX_DRIVER,
+              nativeTurnId: "native-turn-provider-session-manager-thread-idle-steer",
+            }),
+            message: {
+              createdBy: "user",
+              creationSource: "web",
+              messageId: yield* idAllocator.allocate.message({
+                threadId: settled.threadId,
+                ordinal: 2,
+              }),
+              text: "steer",
+              attachments: [],
+            },
+          })
+          .pipe(Effect.andThen(Deferred.succeed(steerDone, undefined)), Effect.forkScoped);
+        yield* Effect.yieldNow;
+        yield* Effect.yieldNow;
+        assert.isTrue(Option.isNone(yield* Deferred.poll(steerDone)));
+        assert.equal((yield* Ref.get(state)).steerCount, 0);
+        yield* Deferred.succeed(releaseUnload, undefined);
+        yield* Fiber.join(steered);
+        // The unload reached the provider before the steer, so the steer
+        // reloaded the thread instead of steering torn-down state.
+        assert.equal(resumesBeforeUnload, 1);
+        assert.equal(steersBeforeUnload, 0);
+        assert.equal((yield* Ref.get(state)).resumeCount, 2);
+        assert.equal((yield* Ref.get(state)).steerCount, 1);
         assert.deepEqual((yield* Ref.get(state)).unloadedNativeThreadIds, ["native-thread"]);
         assert.isTrue(Option.isSome(yield* manager.get(settled.providerSessionId)));
       });

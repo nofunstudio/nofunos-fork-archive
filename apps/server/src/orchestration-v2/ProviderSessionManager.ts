@@ -238,6 +238,13 @@ interface LiveSessionEntry {
 interface ThreadIdleUnloadRecord {
   readonly fiber: Fiber.Fiber<void, never>;
   readonly generation: number;
+  /**
+   * Armed timers sleep; once the sleep elapses the fiber marks its record
+   * in-flight (unloading) instead of deleting it, so release and turn paths
+   * can still join it after it consumed its record. Only the unload fiber
+   * itself removes an in-flight record, when it finishes.
+   */
+  readonly phase: "armed" | "unloading";
 }
 
 type ProviderSessionEventSignal =
@@ -944,6 +951,17 @@ export const layerWithOptions = (
                   if (input.cancelIdleFiber !== false) {
                     yield* cancelIdleFiber(entry.idleFiber);
                   }
+                  // Per-thread idle-unload timers are forked into the layer
+                  // scope, so closing the session scope below would not stop
+                  // them. Interrupt every still-armed timer and join every
+                  // in-flight unload before the runtime closes, so no timer
+                  // outlives its session and no unload touches a released
+                  // runtime.
+                  yield* Effect.forEach(
+                    [...entry.threadIdleUnloadByThread.values()],
+                    (record) => Fiber.interrupt(record.fiber).pipe(Effect.ignore),
+                    { concurrency: "unbounded", discard: true },
+                  );
                   if (input.gracefulSubscribers === true) {
                     yield* endSubscribers(entry);
                   } else if (input.reason === "server_shutdown") {
@@ -1230,32 +1248,51 @@ export const layerWithOptions = (
         );
 
       /**
-       * Drops a thread's pending idle-unload timer, waiting out a fiber that
+       * Drops a thread's pending idle-unload timer, joining a fiber that
        * already started unloading (that fiber clears the loaded mark before
        * the provider call, so the waiter reloads afterwards instead of
        * reusing torn-down native state). Every provider operation below
        * cancels first, so a turn that starts while its timer fires serializes
-       * behind the unload.
+       * behind the unload. Never call while holding the per-thread
+       * attachment lock: joining an in-flight unload that holds it would
+       * deadlock.
        */
       const cancelThreadIdleUnload = (
         providerSessionId: ProviderSessionId,
         threadId: ThreadId,
       ): Effect.Effect<void> =>
         Effect.gen(function* () {
-          const fiber = yield* Ref.modify(sessions, (current) => {
-            const key = sessionKey(providerSessionId);
-            const entry = current.get(key);
-            const record = entry?.threadIdleUnloadByThread.get(threadId);
-            if (entry === undefined || record === undefined) {
-              return [null, current] as const;
-            }
-            const threadIdleUnloadByThread = new Map(entry.threadIdleUnloadByThread);
-            threadIdleUnloadByThread.delete(threadId);
-            const updated = new Map(current);
-            updated.set(key, { ...entry, threadIdleUnloadByThread });
-            return [record.fiber, updated] as const;
-          });
-          yield* cancelIdleFiber(fiber);
+          type PendingUnload = {
+            readonly fiber: Fiber.Fiber<void, never>;
+            readonly interrupt: boolean;
+          } | null;
+          const pending = yield* Ref.modify(
+            sessions,
+            (current): readonly [PendingUnload, Map<string, LiveSessionEntry>] => {
+              const key = sessionKey(providerSessionId);
+              const entry = current.get(key);
+              const record = entry?.threadIdleUnloadByThread.get(threadId);
+              if (entry === undefined || record === undefined) {
+                return [null, current];
+              }
+              if (record.phase === "unloading") {
+                // Already unloading: wait it out without interrupting it. The
+                // unload removes its own record when it finishes.
+                return [{ fiber: record.fiber, interrupt: false }, current];
+              }
+              const threadIdleUnloadByThread = new Map(entry.threadIdleUnloadByThread);
+              threadIdleUnloadByThread.delete(threadId);
+              const updated = new Map(current);
+              updated.set(key, { ...entry, threadIdleUnloadByThread });
+              return [{ fiber: record.fiber, interrupt: true }, updated];
+            },
+          );
+          if (pending === null) {
+            return;
+          }
+          yield* (
+            pending.interrupt ? Fiber.interrupt(pending.fiber) : Fiber.join(pending.fiber)
+          ).pipe(Effect.ignore);
         });
 
       const recordProviderThreadOwner = (input: {
@@ -1285,7 +1322,7 @@ export const layerWithOptions = (
        * same timeout and logging. Serialized with re-attachment, so a thread
        * whose next turn attaches first keeps its state, and one that attaches
        * during the unload waits for it and then reloads (the loaded mark is
-       * cleared before the provider call). A consumed timer never refires, so
+       * cleared before the provider call). A claimed timer never refires, so
        * duplicate fibers from a schedule race cannot double-unload.
        */
       const unloadIdleThreadIfSettled = (input: {
@@ -1309,11 +1346,132 @@ export const layerWithOptions = (
             ) {
               return;
             }
-            // Single-fire: consume the timer before validating, so a racing
-            // duplicate finds nothing and stops.
-            yield* Ref.update(sessions, (current) => {
+            // Single-fire: mark the timer in-flight before validating, so a
+            // racing duplicate finds nothing armed and stops, while release
+            // and turn paths can still join this fiber through its record.
+            // The record is removed once the unload below finishes.
+            const unloadingRecord: ThreadIdleUnloadRecord = {
+              fiber: record.fiber,
+              generation: record.generation,
+              phase: "unloading",
+            };
+            const claimed = yield* Ref.modify(sessions, (current) => {
               const latestEntry = current.get(key);
               if (latestEntry?.threadIdleUnloadByThread.get(input.threadId) !== record) {
+                return [false, current] as const;
+              }
+              const threadIdleUnloadByThread = new Map(latestEntry.threadIdleUnloadByThread);
+              threadIdleUnloadByThread.set(input.threadId, unloadingRecord);
+              const updated = new Map(current);
+              updated.set(key, { ...latestEntry, threadIdleUnloadByThread });
+              return [true, updated] as const;
+            });
+            if (!claimed) {
+              return;
+            }
+            yield* runSettledUnload(input, entry, unloadingRecord);
+          }),
+        );
+
+      /**
+       * Runs the in-flight half of an idle unload claimed above. Removes its
+       * own record when it finishes (or is interrupted), so a newer timer
+       * can arm afterwards and release never observes a stale record.
+       */
+      const runSettledUnload = (
+        input: {
+          readonly providerSessionId: ProviderSessionId;
+          readonly threadId: ThreadId;
+        },
+        entry: LiveSessionEntry,
+        unloadingRecord: ThreadIdleUnloadRecord,
+      ): Effect.Effect<void> => {
+        const key = sessionKey(input.providerSessionId);
+        return Effect.gen(function* () {
+          const unloadThread = entry.exposedRuntime.unloadThread;
+          if (!entry.supportsMultipleProviderThreads || unloadThread === undefined) {
+            return;
+          }
+          // A deleted thread has no shell; its detach already tore down the
+          // native state. An unreadable projection also stops here: unloading
+          // blind could strand a live turn.
+          const snapshot = yield* Effect.option(
+            Effect.zip(
+              projectionStore.getThreadShell(input.threadId),
+              projectionStore.getThreadRecords(input.threadId, [
+                "providerThreads",
+                "providerTurns",
+              ]),
+            ),
+          );
+          if (Option.isNone(snapshot)) {
+            return;
+          }
+          const [shell, records] = snapshot.value;
+          if (shell === null) {
+            return;
+          }
+          const unloadTargets = records.providerThreads.filter(
+            (providerThread) =>
+              providerThread.providerSessionId === input.providerSessionId &&
+              providerThread.nativeThreadRef !== null,
+          );
+          if (unloadTargets.length === 0) {
+            return;
+          }
+          const unloadTargetIds = new Set(unloadTargets.map((providerThread) => providerThread.id));
+          const hasLiveTurn = records.providerTurns.some(
+            (turn) =>
+              unloadTargetIds.has(turn.providerThreadId) &&
+              (turn.status === "pending" || turn.status === "running"),
+          );
+          if (hasLiveTurn) {
+            return;
+          }
+          const nowMs = yield* Clock.currentTimeMillis;
+          if (threadHasQueuedTurnStartSnapshot(shell, nowMs)) {
+            return;
+          }
+          // Clear the loaded mark before the provider call (see above).
+          yield* Ref.update(sessions, (current) => {
+            const latestEntry = current.get(key);
+            if (latestEntry?.runtime !== entry.runtime) {
+              return current;
+            }
+            if (!latestEntry.loadedProviderThreadKeyByThread.has(input.threadId)) {
+              return current;
+            }
+            const loadedProviderThreadKeyByThread = new Map(
+              latestEntry.loadedProviderThreadKeyByThread,
+            );
+            loadedProviderThreadKeyByThread.delete(input.threadId);
+            const updated = new Map(current);
+            updated.set(key, { ...latestEntry, loadedProviderThreadKeyByThread });
+            return updated;
+          });
+          yield* Effect.forEach(
+            unloadTargets,
+            (providerThread) =>
+              unloadThread({ providerThread }).pipe(
+                // Bounded so a wedged provider cannot hold up the thread's
+                // next attach (same bound as the detach path).
+                Effect.timeout(UNLOAD_THREAD_TIMEOUT_MS),
+                Effect.catchCause((cause) =>
+                  Effect.logWarning("orchestration-v2.driver-session.idle-thread-unload-failed", {
+                    providerSessionId: input.providerSessionId,
+                    threadId: input.threadId,
+                    providerThreadId: providerThread.id,
+                    cause,
+                  }),
+                ),
+              ),
+            { concurrency: 1, discard: true },
+          );
+        }).pipe(
+          Effect.ensuring(
+            Ref.update(sessions, (current) => {
+              const latestEntry = current.get(key);
+              if (latestEntry?.threadIdleUnloadByThread.get(input.threadId) !== unloadingRecord) {
                 return current;
               }
               const threadIdleUnloadByThread = new Map(latestEntry.threadIdleUnloadByThread);
@@ -1321,90 +1479,10 @@ export const layerWithOptions = (
               const updated = new Map(current);
               updated.set(key, { ...latestEntry, threadIdleUnloadByThread });
               return updated;
-            });
-            const unloadThread = entry.exposedRuntime.unloadThread;
-            if (!entry.supportsMultipleProviderThreads || unloadThread === undefined) {
-              return;
-            }
-            // A deleted thread has no shell; its detach already tore down the
-            // native state. An unreadable projection also stops here: unloading
-            // blind could strand a live turn.
-            const snapshot = yield* Effect.option(
-              Effect.zip(
-                projectionStore.getThreadShell(input.threadId),
-                projectionStore.getThreadRecords(input.threadId, [
-                  "providerThreads",
-                  "providerTurns",
-                ]),
-              ),
-            );
-            if (Option.isNone(snapshot)) {
-              return;
-            }
-            const [shell, records] = snapshot.value;
-            if (shell === null) {
-              return;
-            }
-            const unloadTargets = records.providerThreads.filter(
-              (providerThread) =>
-                providerThread.providerSessionId === input.providerSessionId &&
-                providerThread.nativeThreadRef !== null,
-            );
-            if (unloadTargets.length === 0) {
-              return;
-            }
-            const unloadTargetIds = new Set(
-              unloadTargets.map((providerThread) => providerThread.id),
-            );
-            const hasLiveTurn = records.providerTurns.some(
-              (turn) =>
-                unloadTargetIds.has(turn.providerThreadId) &&
-                (turn.status === "pending" || turn.status === "running"),
-            );
-            if (hasLiveTurn) {
-              return;
-            }
-            const nowMs = yield* Clock.currentTimeMillis;
-            if (threadHasQueuedTurnStartSnapshot(shell, nowMs)) {
-              return;
-            }
-            // Clear the loaded mark before the provider call (see above).
-            yield* Ref.update(sessions, (current) => {
-              const latestEntry = current.get(key);
-              if (latestEntry?.runtime !== entry.runtime) {
-                return current;
-              }
-              if (!latestEntry.loadedProviderThreadKeyByThread.has(input.threadId)) {
-                return current;
-              }
-              const loadedProviderThreadKeyByThread = new Map(
-                latestEntry.loadedProviderThreadKeyByThread,
-              );
-              loadedProviderThreadKeyByThread.delete(input.threadId);
-              const updated = new Map(current);
-              updated.set(key, { ...latestEntry, loadedProviderThreadKeyByThread });
-              return updated;
-            });
-            yield* Effect.forEach(
-              unloadTargets,
-              (providerThread) =>
-                unloadThread({ providerThread }).pipe(
-                  // Bounded so a wedged provider cannot hold up the thread's
-                  // next attach (same bound as the detach path).
-                  Effect.timeout(UNLOAD_THREAD_TIMEOUT_MS),
-                  Effect.catchCause((cause) =>
-                    Effect.logWarning("orchestration-v2.driver-session.idle-thread-unload-failed", {
-                      providerSessionId: input.providerSessionId,
-                      threadId: input.threadId,
-                      providerThreadId: providerThread.id,
-                      cause,
-                    }),
-                  ),
-                ),
-              { concurrency: 1, discard: true },
-            );
-          }),
+            }),
+          ),
         );
+      };
 
       const scheduleThreadIdleUnloadInternal = (
         providerSessionId: ProviderSessionId,
@@ -1453,7 +1531,11 @@ export const layerWithOptions = (
               return [false, current] as const;
             }
             const threadIdleUnloadByThread = new Map(latestEntry.threadIdleUnloadByThread);
-            threadIdleUnloadByThread.set(threadId, { fiber: idleFiber, generation });
+            threadIdleUnloadByThread.set(threadId, {
+              fiber: idleFiber,
+              generation,
+              phase: "armed",
+            });
             const updated = new Map(current);
             updated.set(key, { ...latestEntry, threadIdleUnloadByThread });
             return [true, updated] as const;
@@ -1924,7 +2006,46 @@ export const layerWithOptions = (
               cancelThreadIdleUnload(providerSessionId, input.threadId).pipe(
                 Effect.andThen(touchActivity(providerSessionId)),
               ),
-            ).pipe(Effect.andThen(runtime.steerTurn(input).pipe(turnMetrics("steer")))),
+            ).pipe(
+              Effect.andThen(
+                // Serialized with an in-flight idle unload on the same lock
+                // the unload holds: the cancel above already joined an
+                // unload that started first, and this lock covers one that
+                // fired in between. A cleared loaded mark means the native
+                // state is gone, so reload before steering instead of
+                // steering torn-down state. A detached thread keeps the old
+                // behavior: steer straight through without resurrecting it.
+                threadAttachment.withLock(
+                  threadAttachmentKey({ providerSessionId, threadId: input.threadId }),
+                  Effect.gen(function* () {
+                    const entry = (yield* Ref.get(sessions)).get(sessionKey(providerSessionId));
+                    if (
+                      entry !== undefined &&
+                      entry.attachedThreadIds.has(input.threadId) &&
+                      !entry.loadedProviderThreadKeyByThread.has(input.threadId)
+                    ) {
+                      const reloaded = yield* runtime.resumeThread({
+                        providerThread: input.providerThread,
+                        threadId: input.threadId,
+                      });
+                      yield* markProviderThreadLoaded({
+                        providerSessionId,
+                        threadId: input.threadId,
+                        providerThreadKey: providerThreadLoadKey({
+                          providerThread: reloaded,
+                        }),
+                      });
+                      yield* recordProviderThreadOwner({
+                        providerSessionId,
+                        threadId: input.threadId,
+                        providerThreadId: reloaded.id,
+                      });
+                    }
+                    return yield* runtime.steerTurn(input).pipe(turnMetrics("steer"));
+                  }),
+                ),
+              ),
+            ),
           interruptTurn: (input) =>
             observeActivity(
               providerSessionId,
