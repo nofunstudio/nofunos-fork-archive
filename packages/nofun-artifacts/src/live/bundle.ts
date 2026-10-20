@@ -130,6 +130,51 @@ function probeFallbackExtensions(
   return undefined;
 }
 
+/**
+ * Namespace for extensionless-fallback proxy modules. esbuild itself
+ * resolves the explicit `./foo.mjs`/`./foo.cjs` specifier inside the
+ * proxy, so browser-field mappings keyed at the fallback path (`false`,
+ * redirects), `sideEffects`, and resolve conditions all apply natively.
+ * Returning the fallback file's own path in the `file` namespace instead
+ * (as two earlier revisions did) drops esbuild's internal disabled-module
+ * state and bundles `browser:false` targets anyway.
+ */
+const FALLBACK_PROXY_NAMESPACE = "nofun-ext-fallback";
+
+/**
+ * Data carried from the fallback `onResolve` to the proxy `onLoad`.
+ * `spec` stays in explicit form (`./foo.mjs`) so the inner import gets
+ * full native semantics; `resolveDir` is the original importer's dir.
+ */
+interface FallbackProxyData {
+  readonly spec: string;
+  readonly resolveDir: string;
+  readonly with?: Record<string, string> | undefined;
+}
+
+/**
+ * Tiny re-export shim whose inner import esbuild resolves natively.
+ * `.mjs` stays ESM: `export *` carries every named export, and the
+ * namespace default carries the default export — including the empty
+ * disabled module, whose namespace is `{}` with an `undefined` default
+ * (JSON-identical to `{}`; see the regression test). A static
+ * `export { default } from` is deliberately NOT used: it hard-errors the
+ * whole build for targets without a default (disabled modules,
+ * named-only modules), even for importers that never touch `default`.
+ * `.cjs` keeps CJS semantics via `module.exports = require(...)`,
+ * preserving interop. Import attributes of the original import, when any,
+ * ride along on both inner statements.
+ */
+function fallbackProxySource(spec: string, ext: ".mjs" | ".cjs", withClause: string): string {
+  if (ext === ".cjs") return `module.exports = require(${JSON.stringify(spec)});\n`;
+  const quoted = JSON.stringify(spec);
+  return (
+    `export * from ${quoted}${withClause};\n` +
+    `import * as __nofun_ext_m from ${quoted}${withClause};\n` +
+    `export default __nofun_ext_m.default;\n`
+  );
+}
+
 const ASSET_LOADERS: Record<string, esbuild.Loader> = {
   ".png": "dataurl",
   ".jpg": "dataurl",
@@ -359,9 +404,9 @@ export async function bundle(
           // specifier first; when it resolves, step aside (undefined) so
           // native handling applies the mapping untouched. Only when even
           // esbuild cannot resolve the original is the fallback selected —
-          // resolved through esbuild so mappings keyed at the fallback
-          // path itself still apply. These round trips run solely on this
-          // rare path (no native target AND a fallback file exists).
+          // via the proxy module below, so mappings keyed at the fallback
+          // path itself still apply natively. This probe runs solely on
+          // this rare path (no native target AND a fallback file exists).
           const markerData = { [FALLBACK_RESOLVE_MARKER]: true };
           const native = await build.resolve(path, {
             resolveDir: args.resolveDir,
@@ -371,20 +416,23 @@ export async function bundle(
             with: args.with,
           });
           if (native.errors.length === 0) return undefined;
-          const fallback = await build.resolve(probed.spec, {
+          // No native target and no mapping for the original specifier:
+          // hand esbuild a proxy module in a private namespace. The proxy
+          // re-exports the explicit `probed.spec`, which esbuild then
+          // resolves natively — browser:false/redirect mappings keyed at
+          // the fallback path, sideEffects, and conditions included. The
+          // visible fields of a `build.resolve` must NOT be returned here:
+          // they carry no disabled-module state. This path makes exactly
+          // one probe call; the fast path above makes none.
+          const proxyData: FallbackProxyData = {
+            spec: probed.spec,
             resolveDir: args.resolveDir,
-            kind: args.kind,
-            importer: args.importer,
-            pluginData: markerData,
             with: args.with,
-          });
-          if (fallback.errors.length > 0 || !cachedIsFile(fallback.path)) return undefined;
+          };
           return {
-            path: fallback.path,
-            namespace: fallback.namespace,
-            external: fallback.external,
-            sideEffects: fallback.sideEffects,
-            suffix: fallback.suffix,
+            path: probed.path,
+            namespace: FALLBACK_PROXY_NAMESPACE,
+            pluginData: proxyData,
           };
         }
         return undefined;
@@ -395,6 +443,19 @@ export async function bundle(
         loader: "tsx",
         resolveDir: dir,
       }));
+      build.onLoad({ filter: /.*/, namespace: FALLBACK_PROXY_NAMESPACE }, (args) => {
+        const data = args.pluginData as FallbackProxyData;
+        const ext = data.spec.endsWith(".cjs") ? ".cjs" : ".mjs";
+        const withClause =
+          data.with != null && Object.keys(data.with).length > 0
+            ? ` with ${JSON.stringify(data.with)}`
+            : "";
+        return {
+          contents: fallbackProxySource(data.spec, ext, withClause),
+          loader: "js",
+          resolveDir: data.resolveDir,
+        };
+      });
       build.onLoad({ filter: /.*/, namespace: "nf-font" }, (args) => ({
         contents: fontModule(args.path),
         loader: "js",

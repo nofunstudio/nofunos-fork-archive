@@ -3,9 +3,21 @@ import * as NodeOs from "node:os";
 import * as NodePath from "node:path";
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import * as NodeVm from "node:vm";
 
 import { bundle } from "../src/live/bundle.ts";
 import type { LiveIndex } from "../src/live/registry.ts";
+
+/**
+ * Execute a bundled IIFE and return the JSON of `globalThis.__rv`, so
+ * tests can assert the runtime namespace shape (not just marker text).
+ */
+function rvJson(js: string): string {
+  const context = NodeVm.createContext({});
+  NodeVm.runInContext(js, context);
+  const value = NodeVm.runInContext("globalThis.__rv", context);
+  return JSON.stringify(value);
+}
 
 /**
  * The chat-list demo chain: `demo.tsx` imports `./experiment-mrch`, which
@@ -253,6 +265,97 @@ test("browser redirect for the extensionless specifier wins over a sibling .mjs 
     const built = await bundleEntry(dir, index, "entry.ts");
     assert.match(built.js, /BROWSER/);
     assert.doesNotMatch(built.js, /MJS/);
+  } finally {
+    NodeFs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("browser:false on the .mjs fallback target still yields the empty disabled module", async () => {
+  const { dir, index } = scratchDir();
+  try {
+    NodeFs.writeFileSync(
+      NodePath.join(dir, "package.json"),
+      `${JSON.stringify({ browser: { "./foo.mjs": false } })}\n`,
+    );
+    NodeFs.writeFileSync(
+      NodePath.join(dir, "foo.mjs"),
+      `export default "MJS_SHOULD_BE_DISABLED";\nexport const named = 1;\n`,
+    );
+    NodeFs.writeFileSync(
+      NodePath.join(dir, "entry.ts"),
+      `import * as value from "./foo";\n(globalThis as any).__rv = value;\n`,
+    );
+    NodeFs.writeFileSync(
+      NodePath.join(dir, "entry-explicit.ts"),
+      `import * as value from "./foo.mjs";\n(globalThis as any).__rv = value;\n`,
+    );
+    // The fallback proxy re-exports the explicit specifier so esbuild
+    // applies the mapping itself. Returning the resolved file path
+    // instead drops esbuild's internal disabled-module state and bundles
+    // the file anyway (round 4). The proxy binds `default` statically — a
+    // static ESM re-export cannot conditionally provide it — so the
+    // disabled namespace carries an `undefined` default; the JSON shape is
+    // exactly `{}` on both sides.
+    const viaFallback = await bundleEntry(dir, index, "entry.ts");
+    const viaExplicit = await bundleEntry(dir, index, "entry-explicit.ts");
+    assert.doesNotMatch(viaFallback.js, /MJS_SHOULD_BE_DISABLED/);
+    assert.equal(rvJson(viaFallback.js), "{}");
+    assert.equal(rvJson(viaFallback.js), rvJson(viaExplicit.js));
+  } finally {
+    NodeFs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("browser redirect on the .mjs fallback target applies through the proxy", async () => {
+  const { dir, index } = scratchDir();
+  try {
+    NodeFs.writeFileSync(
+      NodePath.join(dir, "package.json"),
+      `${JSON.stringify({ browser: { "./foo.mjs": "./bar.ts" } })}\n`,
+    );
+    NodeFs.writeFileSync(NodePath.join(dir, "foo.mjs"), `export default "MJS_FALLBACK";\n`);
+    NodeFs.writeFileSync(NodePath.join(dir, "bar.ts"), `export default "BROWSER";\n`);
+    NodeFs.writeFileSync(
+      NodePath.join(dir, "entry.ts"),
+      `import x from "./foo";\n(globalThis as any).__rv = x;\n`,
+    );
+    NodeFs.writeFileSync(
+      NodePath.join(dir, "entry-explicit.ts"),
+      `import x from "./foo.mjs";\n(globalThis as any).__rv = x;\n`,
+    );
+    // The inner explicit import resolves natively, so the redirect wins
+    // over the sibling .mjs file — including for a default import.
+    const viaFallback = await bundleEntry(dir, index, "entry.ts");
+    const viaExplicit = await bundleEntry(dir, index, "entry-explicit.ts");
+    assert.match(viaFallback.js, /BROWSER/);
+    assert.doesNotMatch(viaFallback.js, /MJS_FALLBACK/);
+    assert.equal(rvJson(viaFallback.js), rvJson(viaExplicit.js));
+  } finally {
+    NodeFs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("extensionless relative import resolves a sibling .cjs file with interop", async () => {
+  const { dir, index } = scratchDir();
+  try {
+    NodeFs.writeFileSync(
+      NodePath.join(dir, "wob.cjs"),
+      `module.exports = { w: "WOBBLE", n: 42 };\n`,
+    );
+    NodeFs.writeFileSync(
+      NodePath.join(dir, "entry.ts"),
+      `import d from "./wob";\nimport { w } from "./wob";\n(globalThis as any).__rv = [d, w];\n`,
+    );
+    NodeFs.writeFileSync(
+      NodePath.join(dir, "entry-explicit.ts"),
+      `import d from "./wob.cjs";\nimport { w } from "./wob.cjs";\n(globalThis as any).__rv = [d, w];\n`,
+    );
+    // The .cjs proxy keeps `module.exports = require(...)` semantics.
+    const viaFallback = await bundleEntry(dir, index, "entry.ts");
+    const viaExplicit = await bundleEntry(dir, index, "entry-explicit.ts");
+    assert.match(viaFallback.js, /WOBBLE/);
+    assert.equal(rvJson(viaFallback.js), rvJson(viaExplicit.js));
+    assert.equal(rvJson(viaFallback.js), `[{"w":"WOBBLE","n":42},"WOBBLE"]`);
   } finally {
     NodeFs.rmSync(dir, { recursive: true, force: true });
   }
