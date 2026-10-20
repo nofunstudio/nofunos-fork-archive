@@ -11,6 +11,7 @@ import {
   writeCanvasBundle,
   type CanvasManifest,
 } from "./canvas-bundle.ts";
+import { validateArtifactSpec } from "./catalog.ts";
 import { compileLinked } from "./linked.ts";
 import { componentsCommit, readComponentsPin } from "./live/source.ts";
 import { readRuntimePin, runtimeRoot, type RuntimePin } from "./runtime-pin.ts";
@@ -73,13 +74,18 @@ export async function emitToolBundle(input: ToolBundleInput): Promise<ToolBundle
   const root = input.runtimeRoot ?? runtimeRoot();
   const runtime = readRuntimePin(version, root);
   const lane = hasSpec ? "spec" : "tsx";
-  const sourceText = hasSpec
-    ? JSON.stringify(typeof input.spec === "string" ? JSON.parse(input.spec) : input.spec, null, 2)
-    : input.tsx!;
+  const rawSpec = hasSpec
+    ? typeof input.spec === "string"
+      ? JSON.parse(input.spec)
+      : input.spec
+    : undefined;
+  const sourceText = hasSpec ? JSON.stringify(rawSpec, null, 2) : input.tsx!;
+  // Same precedence as compileArtifact (`input.theme ?? spec.theme`), so the bundle matches the rendered page.
+  const theme = input.theme ?? (hasSpec ? validateArtifactSpec(rawSpec).theme : undefined);
   const compiled = await compileLinked({
     lane,
     source: hasSpec ? sourceText : input.tsx!,
-    theme: input.theme,
+    theme,
     size,
     runtimeSHA: runtime.version,
     runtimeManifest: NodePath.join(root, runtime.version, "manifest.json"),

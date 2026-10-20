@@ -229,3 +229,48 @@ test(
     }
   },
 );
+
+// The effective theme is `input.theme ?? spec.theme`, as in compileArtifact. A tiny fake runtime is enough.
+async function bundleTheme(spec: unknown, theme: string | undefined): Promise<string> {
+  const root = tmp("nf-theme-root-");
+  const out = tmp("nf-theme-out-");
+  try {
+    const version = "0123456789ab";
+    const dir = NodePath.join(root, version);
+    NodeFs.mkdirSync(dir, { recursive: true });
+    NodeFs.writeFileSync(NodePath.join(dir, "runtime.css"), "body{margin:0}\n");
+    NodeFs.writeFileSync(NodePath.join(dir, "runtime.js"), "window.NoFunUI={};\n");
+    NodeFs.writeFileSync(NodePath.join(dir, "manifest.json"), JSON.stringify({ modules: [] }));
+    const bundle = await emitToolBundle({
+      spec,
+      theme,
+      title: "Theme parity",
+      outRoot: out,
+      runtimeRoot: root,
+      runtimeVersion: version,
+    });
+    const stamp = JSON.parse(NodeFs.readFileSync(NodePath.join(bundle.dir, "stamp.json"), "utf8"));
+    const html = NodeFs.readFileSync(NodePath.join(bundle.dir, "index.html"), "utf8");
+    assert.ok(html.includes(`data-nf-theme="${stamp.theme}"`));
+    return stamp.theme;
+  } finally {
+    NodeFs.rmSync(root, { recursive: true, force: true });
+    NodeFs.rmSync(out, { recursive: true, force: true });
+  }
+}
+
+test(
+  "emitToolBundle uses the spec's theme when no top-level theme is given",
+  { skip: !canCompile },
+  async () => {
+    assert.equal(await bundleTheme({ theme: "t3", ...SPEC }, undefined), "t3");
+  },
+);
+
+test(
+  "emitToolBundle lets an explicit top-level theme win over the spec's theme",
+  { skip: !canCompile },
+  async () => {
+    assert.equal(await bundleTheme({ theme: "t3", ...SPEC }, "kobra"), "kobra");
+  },
+);
