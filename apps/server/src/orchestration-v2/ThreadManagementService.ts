@@ -455,7 +455,9 @@ const make = Effect.gen(function* () {
   const retroBinding = yield* Effect.serviceOption(
     MissionRetroDispatchBinding.MissionRetroDispatchBinding,
   );
-  const missionStore = yield* Effect.serviceOption(MissionAdmissionStore.MissionAdmissionStore);
+  const defaultMissionStore = yield* Effect.serviceOption(
+    MissionAdmissionStore.MissionAdmissionStore,
+  );
   const runtimePolicy = yield* Effect.serviceOption(RuntimePolicy.RuntimePolicyV2);
 
   const ensureLegacyTranscript = Effect.fn(
@@ -566,6 +568,13 @@ const make = Effect.gen(function* () {
         commandType: command.type,
         cause,
       });
+    // Production admission is request-scoped to the authenticated mission
+    // controller. The runtime binding provides this handle to this invocation,
+    // never as a global authority shared by unrelated callers.
+    const missionStore = Option.orElse(
+      yield* Effect.serviceOption(MissionAdmissionStore.MissionAdmissionStore),
+      () => defaultMissionStore,
+    );
     // Check configuration and shape before legacy hydration or any mutation.
     if (Option.isNone(missionStore) || Option.isNone(runtimePolicy)) {
       return yield* rejected("Mission admission/runtime authority is not configured.");

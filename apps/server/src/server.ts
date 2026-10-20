@@ -712,6 +712,7 @@ const layerMakeRoutes = Layer.mergeAll(
     // Mission tools read the same registry, environment, projections, and SQL
     // as the rest of the server; their NoFun policy comes from the owner's
     // local policy file (see MissionMcpRuntime), never from a default.
+    Layer.provide(RuntimeLayer.layerMissionAdmissionRuntime),
     Layer.provide(
       MissionMcpRuntime.layerCombined.pipe(
         Layer.provide(MissionPeerConfiguredClient.layer.pipe(Layer.provide(ProcessRunner.layer))),

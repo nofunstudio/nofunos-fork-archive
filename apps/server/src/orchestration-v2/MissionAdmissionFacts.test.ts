@@ -10,10 +10,38 @@ import {
   ProviderInstanceId,
   TeamId,
   ThreadId,
+  type ServerProvider,
 } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
+import { vi } from "vite-plus/test";
+
+// Passive OS sampling is the external boundary. The production facts reader,
+// provider catalog, canonical mission persistence and decision stay real.
+const sampling = vi.hoisted(() => ({ critical: false }));
+vi.mock("./ExecutionCapacity.ts", async (original) => ({
+  ...(await original<typeof import("./ExecutionCapacity.ts")>()),
+  readExecutionCapacity: async (diskPath: string, observedAtMs: number) => ({
+    hostId: "host",
+    bootId: "boot",
+    observedAtMs,
+    cpu: { utilization: 0.1, count: 8, loadAverage1m: 0.5, saturated: false },
+    memory: {
+      totalBytes: 64 * 1024 ** 3,
+      availableBytes: 32 * 1024 ** 3,
+      pressure: sampling.critical ? "critical" : "normal",
+    },
+    disk: { path: diskPath, availableBytes: 100 * 1024 ** 3, floorBytes: 5 * 1024 ** 3 },
+    buildLock: { path: "build-lock", state: "available" },
+    ready: !sampling.critical,
+    reasons: sampling.critical ? ["memory_critical"] : [],
+  }),
+}));
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
+import * as Clock from "effect/Clock";
+import * as DateTime from "effect/DateTime";
+import * as Result from "effect/Result";
+import { decideMissionAdmission } from "./MissionAdmission.ts";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Schema from "effect/Schema";
@@ -387,4 +415,143 @@ it.effect(
       yield* ordinaryDispatch.pipe(Effect.provide(runtime));
     });
   },
+);
+
+// Removing the canonical-field mapping must turn a healthy server observation
+// into a denial; stale usage and unqualified hosts must never gain admission.
+it.effect.each([
+  "healthy",
+  "stale_usage",
+  "unqualified_host",
+  "memory_critical",
+  "foreign_account",
+] as const)("derives canonical admission facts from %s observations", (scenario) =>
+  Effect.gen(function* () {
+    sampling.critical = scenario === "memory_critical";
+    const now = yield* Clock.currentTimeMillis;
+    const canonical = {
+      ...mission,
+      tasks: mission.tasks.map((task) => ({
+        ...task,
+        writerScope: "/workspace/project/src/admission",
+        sharedManifestScopes: [],
+        guiScopes: [],
+        taskNecessary: true,
+      })),
+    };
+    const provider: ServerProvider = {
+      instanceId: ProviderInstanceId.make("provider-proposal"),
+      driver: ProviderDriverKind.make("codex"),
+      enabled: true,
+      installed: true,
+      version: "offline",
+      status: "ready",
+      auth: { status: "authenticated" },
+      checkedAt: DateTime.formatIso(DateTime.makeUnsafe(now)),
+      models: [{ slug: "gpt-6.1-sol", name: "Sol", isCustom: false, capabilities: null }],
+      slashCommands: [],
+      skills: [],
+      admissionAttestation: {
+        accountId: scenario === "foreign_account" ? "another-account" : "account-proposal",
+        company: "No Fun",
+        billingMode: "subscription",
+        verifiedAtMs: now,
+        routes: [
+          {
+            modelId: "gpt-6.1-sol",
+            profile: "default",
+            capability: "writer",
+            supportedModelIds: ["gpt-6.1-sol"],
+          },
+        ],
+      },
+      usageLimits: {
+        checkedAt: DateTime.formatIso(
+          DateTime.makeUnsafe(now - (scenario === "stale_usage" ? 31 * 60_000 : 0)),
+        ),
+        windows: [{ id: "five_hour", kind: "session", label: "5h", usedPercent: 20 }],
+      },
+    };
+    const factsAuthority = Layer.succeed(Missions.MissionAuthority, {
+      ...authority,
+      company: "No Fun",
+      hostQualification: {
+        hostId: "host",
+        bootId: "boot",
+        buildObserved: true,
+        buildOk: scenario !== "unqualified_host",
+        toolchainObserved: true,
+        toolchainOk: true,
+        observedAtMs: now,
+      },
+      repositoryObservations: [
+        {
+          projectId: "project-admission",
+          workspaceRootRealpath: "/workspace/project",
+          observedAncestry: ["base"],
+          observedAtMs: now,
+        },
+      ],
+    });
+    const layers = Layer.mergeAll(
+      Facts.layer,
+      Missions.layer.pipe(Layer.provide(Layer.mergeAll(Events.layer, Receipts.layer))),
+    ).pipe(
+      Layer.provide(factsAuthority),
+      Layer.provide(ProviderRegistryMock.layer([provider])),
+      Layer.provideMerge(Sqlite.layerMemory),
+    );
+    yield* Effect.gen(function* () {
+      yield* (yield* Missions.MissionService).execute({
+        type: "mission.create",
+        commandId: CommandId.make("healthy-seed"),
+        mission: canonical,
+      });
+      const facts = yield* (yield* AdmissionStore.MissionAdmissionFactsPort).readFacts({
+        ...request,
+        mission: canonical,
+      });
+      const decision = decideMissionAdmission(
+        { ...request, mission: canonical },
+        {
+          ...facts,
+          scopes: {
+            writerScope: facts.writerScope,
+            sharedManifestScopes: facts.sharedManifestScopes,
+            guiScopes: facts.guiScopes,
+            activeWriterScopes: [],
+          },
+          priorAttempt: {
+            state: "none",
+            attemptNumber: null,
+            cancelRequested: false,
+            leaseExpired: false,
+          },
+          priorReceipts: [],
+        },
+      );
+      if (scenario === "healthy") {
+        expect(Result.isSuccess(decision)).toBe(true);
+        expect(facts.writerScope).toBe("/workspace/project/src/admission");
+        expect(facts.route.accountId).toBe("account-proposal");
+      } else {
+        expect(Result.isFailure(decision)).toBe(true);
+        if (Result.isFailure(decision))
+          expect(decision.failure.code).toBe(
+            scenario === "stale_usage"
+              ? "usage_unknown"
+              : scenario === "foreign_account"
+                ? "account_mismatch"
+                : "host_not_ready",
+          );
+      }
+    }).pipe(
+      Effect.provide(layers),
+      Effect.ensuring(
+        Effect.sync(() => {
+          sampling.critical = false;
+        }),
+      ),
+    );
+  }),
 );

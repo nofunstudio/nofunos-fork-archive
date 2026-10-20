@@ -38,7 +38,7 @@ import {
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import { makeProviderCapacityReader } from "./ProviderCapacity.ts";
 import { readExecutionCapacity, withExecutionCapacity } from "./ExecutionCapacity.ts";
-import { MissionAuthority } from "./MissionService.ts";
+import { MissionAuthority, MissionTransactionGuard } from "./MissionService.ts";
 
 /**
  * Dormant internal admission store. Reserves mission dispatch admission
@@ -274,6 +274,20 @@ const make = Effect.gen(function* () {
         operation: "reserve",
         category: "persistence",
       });
+    }
+    // Public request-scoped authority must remain live at the owning commit,
+    // including on exact replay. Internal/offline authorities keep their contract.
+    if (authority.transactionGuard !== undefined) {
+      yield* MissionTransactionGuard.check({
+        sql,
+        authority,
+        request: { operation: "read", missionId: canonical.id },
+        expectedMission: canonical,
+      }).pipe(
+        Effect.mapError(
+          () => new MissionAdmissionStoreError({ operation: "reserve", category: "scope_denied" }),
+        ),
+      );
     }
     if (trusted.teamId !== authority.teamId || trusted.environmentId !== authority.environmentId) {
       return yield* new MissionAdmissionStoreError({
