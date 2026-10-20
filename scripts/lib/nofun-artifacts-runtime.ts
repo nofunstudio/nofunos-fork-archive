@@ -13,19 +13,79 @@
  * desktop build config, and the entries rewrite their own location (and esbuild's binary path) from
  * app.asar to app.asar.unpacked before anything reads them.
  */
+import { createHash } from "node:crypto";
 import * as NodeFs from "node:fs";
 import { createRequire } from "node:module";
 import * as NodePath from "node:path";
 
 export const NOFUN_ARTIFACTS_PACKAGE = "@t3tools/nofun-artifacts";
 
+export interface MissionRuntimePin {
+  readonly version: string;
+  readonly sha256: string;
+}
+
 /**
- * Mission No Fun UI runtime versions the packaged app must carry next to the components.pin one.
- * Source of truth is the Canvas contract (nofun-canvas deps.lock `runtime`; the same value the
- * `runtime-pin.test.ts` contract test asserts as its reference VERSION). No pin file for it exists
- * in this repo, so this list is the single copy; the staging test imports it from here.
+ * Mission No Fun UI runtimes the packaged app must carry next to the components.pin one, as
+ * (version, digest) pairs. Source of truth is the Canvas contract (nofun-canvas deps.lock
+ * `runtime`; the same pair the `runtime-pin.test.ts` contract test asserts as its reference).
+ * No pin file for it exists in this repo, so this table is the single copy; the staging test
+ * imports it from here and asserts the exact canonical entry.
  */
-export const MISSION_RUNTIME_VERSIONS = ["580e64f46a50"] as const;
+export const MISSION_RUNTIMES: readonly MissionRuntimePin[] = [
+  {
+    version: "580e64f46a50",
+    sha256: "8c0394e7bf16e136dae5109cb16d5effd39a2bea2bd6a77769a8296004c0d5db",
+  },
+];
+
+/** Mission runtime versions, derived from the pin table above. */
+export const MISSION_RUNTIME_VERSIONS: readonly string[] = MISSION_RUNTIMES.map(
+  (pin) => pin.version,
+);
+
+const sha256Hex = (bytes: Buffer | string) => createHash("sha256").update(bytes).digest("hex");
+
+/**
+ * The mission-pair digest: the same rule as `runtimeDigest` in
+ * packages/nofun-artifacts/src/runtime-pin.ts — sha256 of
+ * `runtime.css:<sha256 of runtime.css>\nruntime.js:<sha256 of runtime.js>\n`.
+ * Kept local (node:crypto only) so the build step never imports the compiled package.
+ */
+export function missionRuntimeDigest(runtimeDir: string): string {
+  const parts = ["runtime.css", "runtime.js"].map((name) => {
+    const file = NodePath.join(runtimeDir, name);
+    if (NodeFs.lstatSync(file, { throwIfNoEntry: false })?.isFile() !== true) {
+      throw new Error(`runtime folder ${runtimeDir} has no regular file ${name}.`);
+    }
+    return `${name}:${sha256Hex(NodeFs.readFileSync(file))}\n`;
+  });
+  return sha256Hex(parts.join(""));
+}
+
+/**
+ * Where the canonical mission runtime `<version>/` directory comes from. A local
+ * `runtime:build` is NOT a source: rebuilds of the same components commit drift from the
+ * canonical bytes both pinned hosts admit. Either set NOFUN_MISSION_RUNTIME_ROOT to a directory
+ * containing `<version>/` folders copied byte-for-byte from the canonical publisher
+ * (nofun-components `canvas-web/nofun-ui-runtime/<version>/`; equivalently nofun-canvas
+ * `Sources/CanvasMac/Runtime/nofun-ui-runtime/<version>/`), or set NOFUN_COMPONENTS_DIR at a
+ * checkout that publishes `canvas-web/nofun-ui-runtime/<version>/`.
+ */
+export function missionRuntimeSourceDir(version: string, repoRoot: string): string {
+  const override = process.env.NOFUN_MISSION_RUNTIME_ROOT?.trim();
+  if (override) return NodePath.join(override, version);
+  const componentsDir = process.env.NOFUN_COMPONENTS_DIR?.trim();
+  if (componentsDir) {
+    return NodePath.join(componentsDir, "canvas-web", "nofun-ui-runtime", version);
+  }
+  throw new Error(
+    `no canonical source for mission runtime ${version}: set NOFUN_MISSION_RUNTIME_ROOT to a ` +
+      `directory holding byte-for-byte canonical <version>/ folders, or set NOFUN_COMPONENTS_DIR ` +
+      `at a checkout publishing canvas-web/nofun-ui-runtime/${version}/ (repo root ${repoRoot} ` +
+      `has no canonical copy; never stage a local runtime:build output for a mission version).`,
+  );
+}
 
 /** Packages the prebuilt entries leave external; everything else the compiler imports is inlined. */
 const RUNTIME_DEPENDENCIES = ["esbuild", "playwright-core"] as const;
@@ -65,6 +125,10 @@ export default esbuild;
 export async function prebuildNofunArtifactsRuntime(input: {
   readonly repoRoot: string;
   readonly outDir: string;
+  /** Mission pin table under test; defaults to the canonical MISSION_RUNTIMES above. */
+  readonly missionRuntimes?: readonly MissionRuntimePin[];
+  /** Canonical mission root under test; defaults to the NOFUN_* env resolution above. */
+  readonly missionRuntimeRoot?: string;
 }): Promise<void> {
   const packageDir = NodePath.join(input.repoRoot, "packages/nofun-artifacts");
   const sourcePackage = JSON.parse(
@@ -113,29 +177,71 @@ export async function prebuildNofunArtifactsRuntime(input: {
       .trim()
       .split(/\s+/)[0]
       ?.toLowerCase() ?? "";
-  const requiredVersions = [pinHead.slice(0, 12), ...MISSION_RUNTIME_VERSIONS];
-  for (const version of requiredVersions) {
-    const runtimeDir = NodePath.join(runtimeSrcDir, version);
-    const stats = NodeFs.lstatSync(runtimeDir, { throwIfNoEntry: false });
-    const hasFiles =
-      stats?.isDirectory() === true &&
-      NodeFs.lstatSync(NodePath.join(runtimeDir, "runtime.js"), {
-        throwIfNoEntry: false,
-      })?.isFile() === true &&
-      NodeFs.lstatSync(NodePath.join(runtimeDir, "runtime.css"), {
-        throwIfNoEntry: false,
-      })?.isFile() === true;
-    if (!pinHead || !hasFiles) {
+  const pinVersion = pinHead.slice(0, 12);
+  const pinDir = NodePath.join(runtimeSrcDir, pinVersion);
+  const pinStats = NodeFs.lstatSync(pinDir, { throwIfNoEntry: false });
+  const pinHasFiles =
+    pinStats?.isDirectory() === true &&
+    NodeFs.lstatSync(NodePath.join(pinDir, "runtime.js"), {
+      throwIfNoEntry: false,
+    })?.isFile() === true &&
+    NodeFs.lstatSync(NodePath.join(pinDir, "runtime.css"), {
+      throwIfNoEntry: false,
+    })?.isFile() === true;
+  if (!pinHead || !pinHasFiles) {
+    throw new Error(
+      `no built runtime at ${pinDir} for version ${pinVersion}; run \`pnpm runtime:build\` ` +
+        `in packages/nofun-artifacts with NOFUN_COMPONENTS_DIR at a clean ${pinVersion} checkout ` +
+        `(NOFUN_COMPONENTS_ALLOW_DIRTY=1 when its HEAD is not components.pin) first.`,
+    );
+  }
+  // Mission runtimes are never staged from a local runtime:build: their bytes must equal the
+  // canonical pair both pinned hosts admit, so copy them from the canonical source and fail
+  // closed when the digest disagrees.
+  const missionRuntimes = input.missionRuntimes ?? MISSION_RUNTIMES;
+  const missionSources = new Map<string, string>();
+  for (const pin of missionRuntimes) {
+    const sourceDir =
+      input.missionRuntimeRoot != null
+        ? NodePath.join(input.missionRuntimeRoot, pin.version)
+        : missionRuntimeSourceDir(pin.version, input.repoRoot);
+    let actual: string;
+    try {
+      actual = missionRuntimeDigest(sourceDir);
+    } catch (error) {
       throw new Error(
-        `no built runtime at ${runtimeDir} for version ${version}; run \`pnpm runtime:build\` ` +
-          `in packages/nofun-artifacts with NOFUN_COMPONENTS_DIR at a clean ${version} checkout ` +
-          `(NOFUN_COMPONENTS_ALLOW_DIRTY=1 when its HEAD is not components.pin) first.`,
+        `no canonical mission runtime at ${sourceDir} for version ${pin.version}; copy it ` +
+          `byte-for-byte from canvas-web/nofun-ui-runtime/${pin.version}/ (or set ` +
+          `NOFUN_MISSION_RUNTIME_ROOT at such a root) instead of rebuilding it: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
       );
     }
+    if (actual !== pin.sha256) {
+      throw new Error(
+        `mission runtime ${pin.version} at ${sourceDir} has sha256 ${actual}, expected ` +
+          `${pin.sha256}; refusing to stage non-canonical bytes the pinned hosts reject.`,
+      );
+    }
+    missionSources.set(pin.version, sourceDir);
   }
-  NodeFs.cpSync(runtimeSrcDir, NodePath.join(input.outDir, "dist", "nofun-ui-runtime"), {
-    recursive: true,
-  });
+  const stagedRuntimeDir = NodePath.join(input.outDir, "dist", "nofun-ui-runtime");
+  NodeFs.mkdirSync(stagedRuntimeDir, { recursive: true });
+  NodeFs.cpSync(pinDir, NodePath.join(stagedRuntimeDir, pinVersion), { recursive: true });
+  for (const [version, sourceDir] of missionSources) {
+    if (version === pinVersion) {
+      // The staged bytes come from the local build here, so they still face the pin.
+      const staged = missionRuntimeDigest(NodePath.join(stagedRuntimeDir, pinVersion));
+      const expected = missionRuntimes.find((pin) => pin.version === version)?.sha256;
+      if (staged !== expected) {
+        throw new Error(
+          `mission runtime ${version} built locally has sha256 ${staged}, expected ` +
+            `${expected}; refusing to stage non-canonical bytes the pinned hosts reject.`,
+        );
+      }
+      continue;
+    }
+    NodeFs.cpSync(sourceDir, NodePath.join(stagedRuntimeDir, version), { recursive: true });
+  }
   const shimPath = NodePath.join(input.outDir, "esbuild-shim.mjs");
   NodeFs.writeFileSync(shimPath, ESBUILD_SHIM);
 
