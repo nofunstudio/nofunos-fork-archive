@@ -336,6 +336,31 @@ describe("MissionAdmission", () => {
     );
   });
 
+  it("refuses a session-only 6-day-old Muse observation as unknown", () => {
+    const sessionOnly: ServerProviderUsageLimits = {
+      checkedAt: iso(NOW_MS - 6 * 24 * 60 * 60_000),
+      windows: [
+        {
+          id: "five_hour",
+          kind: "session",
+          label: "5h",
+          usedPercent: 40,
+          resetsAt: iso(NOW_MS - 5 * 24 * 60 * 60_000),
+        },
+      ],
+    };
+    const result = decideMissionAdmission(requestFixture(), {
+      ...factsFixture(),
+      usageSource: "muse",
+      usageLimits: sessionOnly,
+    });
+    assert.isTrue(Result.isFailure(result));
+    assert.strictEqual(
+      Result.isFailure(result) ? result.failure.code : "unreachable",
+      "usage_unknown",
+    );
+  });
+
   it("denies stale and future usage as unknown", () => {
     assert.strictEqual(
       codeOf(requestFixture(), {

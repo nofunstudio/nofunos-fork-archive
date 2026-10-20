@@ -202,7 +202,7 @@ describe("usageHeadroom", () => {
     expect(result.summary).toContain("weekly 90% left");
   });
 
-  it("reports a bounded stale-but-likely-fresh headroom when every window reset", () => {
+  it("reports unknown when every window reset without a weekly window", () => {
     const result = usageHeadroom(
       {
         checkedAt: at(-400),
@@ -211,8 +211,8 @@ describe("usageHeadroom", () => {
       NOW,
       { trustUnresetWindow: true },
     );
-    expect(result.headroom).toBe("ok");
-    expect(result.summary).toContain("likely fresh");
+    expect(result.headroom).toBe("unknown");
+    expect(result.summary).toContain("weekly window");
   });
 
   it("expires the all-reset passive grace one weekly period past the observation", () => {

@@ -29,7 +29,8 @@ export interface UsageHeadroomOptions {
    * is still classified from its observed numbers while no gating window
    * has reset since the observation; after a reset it reports a bounded
    * stale-but-likely-fresh headroom (from the weekly window when that one
-   * has not reset, else `ok` only inside `PASSIVE_POST_RESET_GRACE_MS`)
+   * has not reset, else `ok` only inside `PASSIVE_POST_RESET_GRACE_MS`
+   * when a weekly window was observed, else unknown)
    * instead of unknown. Observed low/exhausted numbers stay low/exhausted
    * either way. Default false: every other source keeps the pessimistic
    * clock rule. This never refreshes usage.
@@ -39,13 +40,14 @@ export interface UsageHeadroomOptions {
 
 /**
  * Post-reset grace for passive-only sources (Muse): once every gating
- * window has reset since the observation, the old healthy reading stays
+ * window has reset since the observation, an old healthy reading stays
  * admissible for at most one weekly quota period past the observation, and
  * never past the next weekly reset after the observed weekly reset (the
  * observed weekly `resetsAt` plus one weekly period). Past that bound the
  * current weekly quota may already be spent by intervening work outside
  * this observation stream, so the verdict is `unknown` and admission falls
- * back to the bounded unknown-usage exception.
+ * back to the bounded unknown-usage exception. The grace applies only when
+ * a weekly window was observed; without one the verdict is `unknown`.
  */
 const PASSIVE_POST_RESET_GRACE_MS = 7 * 24 * 60 * 60_000;
 
@@ -239,7 +241,8 @@ export function usageHeadroom(
  * reset since the observation; after a reset the verdict falls back to the
  * windows that have not reset (the weekly quota), and only when every
  * window reset does it report a bounded stale-but-likely-fresh ok inside
- * `PASSIVE_POST_RESET_GRACE_MS` (unknown past the grace).
+ * `PASSIVE_POST_RESET_GRACE_MS` (unknown past the grace). The grace itself
+ * requires an observed weekly window; without one the verdict is unknown.
  */
 function stalePassiveHeadroom(
   windows: ReadonlyArray<ServerProviderUsageWindow>,
@@ -266,13 +269,22 @@ function stalePassiveHeadroom(
     };
   }
   // Every window reset since the observation: the numbers no longer bound
-  // any live quota. Allow only the bounded post-reset grace, then read the
-  // observation as stale so admission requires the bounded unknown-usage
-  // exception instead of admitting on a previous period's healthy reading.
+  // any live quota. Post-reset grace additionally requires an observed
+  // weekly window to bound the current weekly quota: a session-only
+  // observation leaves the weekly quota unbounded (it may have been spent
+  // after the observation), so it reads as unknown and admission requires
+  // the bounded unknown-usage exception instead of admitting on a previous
+  // period's healthy reading.
   const weeklyResets = windows
     .filter((window) => window.kind === "weekly" && window.resetsAt !== undefined)
     .map((window) => Date.parse(window.resetsAt as string))
     .filter((resetMs) => Number.isFinite(resetMs));
+  if (weeklyResets.length === 0) {
+    return {
+      headroom: "unknown",
+      summary: `usage observation is stale or unavailable (post-reset grace requires a weekly window) ${ageNote}`,
+    };
+  }
   const graceEndMs = Math.min(
     checkedMs + PASSIVE_POST_RESET_GRACE_MS,
     ...weeklyResets.map((resetMs) => resetMs + PASSIVE_POST_RESET_GRACE_MS),
