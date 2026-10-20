@@ -73,7 +73,15 @@ const CHART_TONES = [
   "error",
   "info",
 ] as const;
-const CELL_FORMATS = ["text", "number", "currency", "percent", "compact", "status"] as const;
+const CELL_FORMATS = [
+  "text",
+  "decimal",
+  "number",
+  "currency",
+  "percent",
+  "compact",
+  "status",
+] as const;
 
 /** A WebP `data:` thumbnail is 8–32 KB. 4096 characters rejected those. */
 const GALLERY_SRC_MAX = 65_536;
@@ -180,7 +188,10 @@ export const ARTIFACT_CATALOG: Record<string, ComponentSpec> = {
               key: str("Row field.", 60, true),
               label: str("Header.", 60, true),
               align: oneOf(["start", "center", "end"], "Default end for numeric formats."),
-              format: oneOf(CELL_FORMATS, "Cell format. status renders a Status badge."),
+              format: oneOf(
+                CELL_FORMATS,
+                "Cell format. decimal is an alias for number; status renders a Status badge.",
+              ),
               currency: str("ISO code for currency.", 3),
               tones: {
                 type: { kind: "record", values: { kind: "enum", values: STATUS_TONES } },
@@ -545,7 +556,26 @@ function checkNode(
   }
 }
 
-/** Validates a spec against the catalog; throws ArtifactSpecError listing every problem with its path. */
+// Normalize at the compiler boundary: already shipped linked runtimes know the table's `number`
+// format, while Metric and Chart use `decimal`. Never send a new format to an old pinned runtime.
+function normalizeNumberFormats(node: ArtifactNode): ArtifactNode {
+  const props =
+    node.component === "DataTable" && Array.isArray(node.props?.columns)
+      ? {
+          ...node.props,
+          columns: (node.props.columns as Record<string, unknown>[]).map((column) =>
+            column.format === "decimal" ? { ...column, format: "number" } : column,
+          ),
+        }
+      : node.props;
+  return {
+    ...node,
+    ...(props === undefined ? {} : { props }),
+    ...(node.children === undefined ? {} : { children: node.children.map(normalizeNumberFormats) }),
+  };
+}
+
+/** Validates and normalizes a spec; throws ArtifactSpecError listing every problem with its path. */
 export function validateArtifactSpec(spec: unknown): ArtifactSpec {
   const issues: string[] = [];
   if (typeof spec !== "object" || spec === null || Array.isArray(spec)) {
@@ -563,7 +593,8 @@ export function validateArtifactSpec(spec: unknown): ArtifactSpec {
   if (root === undefined) issues.push("spec.root: required.");
   else checkNode(root, "root", issues, { nodes: 0 }, 0);
   if (issues.length > 0) throw new ArtifactSpecError(issues);
-  return spec as ArtifactSpec;
+  const valid = spec as ArtifactSpec;
+  return { ...valid, root: normalizeNumberFormats(valid.root) };
 }
 
 /** Compact catalog listing for agent-facing descriptions. */

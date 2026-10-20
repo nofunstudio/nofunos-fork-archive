@@ -146,7 +146,7 @@ export const NofunArtifactPreviewTool = Tool.make(NOFUN_ARTIFACT_PREVIEW_TOOL_NA
 // Publishes through HtmlRender.publish, the same store html_render uses, and returns the same
 // `htmlRender` reference, so every client shows it inline like any HTML render.
 export const NofunArtifactRenderTool = Tool.make(NOFUN_ARTIFACT_RENDER_TOOL_NAME, {
-  description: `Compile a No Fun artifact and show it in this thread, above your final text reply (call it before writing that reply; don't announce or restate the page). Preview with nofun_artifact_preview first. Same inputs as the preview, plus display and open: a small chart or single metric shows inline; a dashboard, multi-section page or interactive tool should pass display \"card\" with open true.\n\n${NOFUN_ARTIFACT_GUIDE}`,
+  description: `Compile a No Fun artifact and show it in this thread, above your final text reply (call it before writing that reply; don't announce or restate the page). Preview with nofun_artifact_preview first. Pass output "canvas-bundle" to also write a pinned Canvas bundle; call Canvas place_artifact with the returned place_artifact arguments plus board_id. Same inputs as the preview, plus display and open: a small chart or single metric shows inline; a dashboard, multi-section page or interactive tool should pass display "card" with open true.\n\n${NOFUN_ARTIFACT_GUIDE}`,
   parameters: Schema.Struct({
     ...ArtifactInput,
     title: Schema.String.check(
@@ -156,6 +156,12 @@ export const NofunArtifactRenderTool = Tool.make(NOFUN_ARTIFACT_RENDER_TOOL_NAME
     height: Schema.optional(
       Schema.Int.annotate({
         description: `Frame height cap in CSS pixels, ${HTML_RENDER_MIN_HEIGHT}-${HTML_RENDER_MAX_HEIGHT}. Omit to fit the page; pass less than the preview's contentHeight to make it scroll.`,
+      }),
+    ),
+    output: Schema.optional(
+      Schema.Literals(["html", "canvas-bundle"]).annotate({
+        description:
+          '"html" (default) shows the page in the thread. "canvas-bundle" also writes a linked Canvas bundle, with manifest, sha256, runtime pin and stamp.json. Pass {...result.place_artifact, board_id: "..."} to Canvas place_artifact on this host.',
       }),
     ),
     bundle: Schema.optional(
@@ -178,7 +184,7 @@ export const NofunArtifactRenderTool = Tool.make(NOFUN_ARTIFACT_RENDER_TOOL_NAME
         ),
       }).annotate({
         description:
-          "Also write a Canvas bundle (nofun-canvas-artifact-bundle v1) that loads the pinned No Fun UI runtime, and return its directory, manifest sha256 and runtime pin. Omit to only show the page in the thread.",
+          "Options for output canvas-bundle. Providing this object also requests a bundle for compatibility with older callers. Omit both output and bundle to only show the page in the thread.",
       }),
     ),
     display: Schema.optional(
@@ -208,9 +214,18 @@ export const NofunArtifactRenderTool = Tool.make(NOFUN_ARTIFACT_RENDER_TOOL_NAME
       Schema.Struct({
         directory: Schema.String,
         manifestPath: Schema.String,
+        stampPath: Schema.String,
         sha256: Schema.String,
         createdAt: Schema.String,
         runtime: Schema.Struct({ version: Schema.String, sha256: Schema.String }),
+      }),
+    ),
+    place_artifact: Schema.optional(
+      Schema.Struct({
+        bundle_path: Schema.String,
+      }).annotate({
+        description:
+          "Arguments for Canvas MCP place_artifact on this host; add the destination board_id. No HTML wrapping or URL rewriting is needed.",
       }),
     ),
     message: Schema.String,
