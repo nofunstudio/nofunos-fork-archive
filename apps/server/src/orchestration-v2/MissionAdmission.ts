@@ -8,6 +8,7 @@ import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 
 import { usageHeadroom } from "../mcp/usageHeadroom.ts";
+import { assessBuildCurrency, type ServerBuild } from "./ServerBuildIdentity.ts";
 
 /**
  * Pure single-host admission decision at the server domain seam.
@@ -22,6 +23,7 @@ import { usageHeadroom } from "../mcp/usageHeadroom.ts";
 export const MissionAdmissionRejectionCode = Schema.Literals([
   "mission_not_active",
   "thread_epoch_mismatch",
+  "build_mismatch",
   "scope_mismatch",
   "task_unknown",
   "task_not_ready",
@@ -177,9 +179,22 @@ export interface MissionAdmissionUnknownUsageException {
   readonly unused?: boolean | undefined;
 }
 
+/**
+ * Server build gate (J01 gate 3): the exact server build the mission
+ * requires, plus the running server build to check it against. `required`
+ * is null when the mission pins no build (legacy missions); the running
+ * side comes from `ServerBuildIdentity` at the facts layer. Absent entirely
+ * on older facts snapshots, which also means no gate.
+ */
+export interface MissionAdmissionServerBuildFacts {
+  readonly running: ServerBuild;
+  readonly required: ServerBuild | null;
+}
+
 export interface MissionAdmissionFacts {
   /** Derived from canonical task/result state, never the dispatch proposal. */
   readonly taskNecessary: boolean;
+  readonly serverBuild?: MissionAdmissionServerBuildFacts | undefined;
   readonly nowMs: number;
   readonly teamId: string;
   readonly environmentId: string;
@@ -351,6 +366,45 @@ export const requestDigestFor = (input: {
 
 const freshTimestamp = (ts: number, nowMs: number, maxAge: number): boolean =>
   Number.isFinite(ts) && ts >= 0 && ts <= nowMs && nowMs - ts <= maxAge;
+
+const describeBuild = (build: ServerBuild): string =>
+  `'${build.sha ?? "unknown"}' (version '${build.version ?? "unknown"}')`;
+
+const checkServerBuild = (
+  missionId: string,
+  dispatchKey: string,
+  build: MissionAdmissionServerBuildFacts | undefined,
+): MissionAdmissionResult | null => {
+  if (build === undefined || build.required === null) return null;
+  if (build.required.sha === null || build.required.sha.trim().length === 0) {
+    return err(
+      "build_mismatch",
+      `Mission '${missionId}' pins a server build but the required SHA is missing; re-pin the mission first.`,
+      dispatchKey,
+    );
+  }
+  const currency = assessBuildCurrency(build.running, build.required);
+  if (currency.ok) return null;
+  if (currency.reason === "unknown-running") {
+    return err(
+      "build_mismatch",
+      `Mission '${missionId}' requires server build ${describeBuild(build.required)}, but the running server build is unknown; reinstall the current build first.`,
+      dispatchKey,
+    );
+  }
+  if (currency.reason === "older") {
+    return err(
+      "build_mismatch",
+      `Running server build ${describeBuild(build.running)} is older than the build mission '${missionId}' requires (${describeBuild(build.required)}); reinstall the current build first.`,
+      dispatchKey,
+    );
+  }
+  return err(
+    "build_mismatch",
+    `Running server build ${describeBuild(build.running)} is not equal to the build mission '${missionId}' requires (${describeBuild(build.required)}); reinstall the current build first.`,
+    dispatchKey,
+  );
+};
 
 export const decideMissionAdmission = (
   request: MissionAdmissionRequest,
@@ -541,6 +595,13 @@ export const decideMissionAdmission = (
     teamId: facts.teamId,
     workspaceRoot: request.workspaceRoot,
   });
+
+  // J01 gate 3: the mission pins the exact server build it requires. An
+  // old, different, or unknown binary refuses here, before same-key recovery,
+  // so a stale server can neither admit nor recover a dispatch. Same-build
+  // replay still recovers below (BK1 idempotency is preserved).
+  const buildGate = checkServerBuild(mission.id, dispatchKey, facts.serverBuild);
+  if (buildGate !== null) return buildGate;
 
   // Same-key recovery: retrieval only, after all scope/auth/hash checks above.
   // No new usage/host/lease capacity is required to read admitted state.

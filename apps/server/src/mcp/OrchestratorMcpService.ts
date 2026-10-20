@@ -72,6 +72,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
+import { resolveServerBuild } from "../orchestration-v2/ServerBuildIdentity.ts";
 import { usageHeadroomObservation } from "./usageHeadroom.ts";
 import { makeProviderCapacityReader } from "../orchestration-v2/ProviderCapacity.ts";
 import { readExecutionCapacity } from "../orchestration-v2/ExecutionCapacity.ts";
@@ -1880,6 +1881,9 @@ const make = Effect.gen(function* () {
           runtimeMode: limits.runtimeMode,
           interactionMode: limits.interactionMode,
           hostCapacity: { ...hostCapacity, delegatedChildren: { active, byProviderInstance } },
+          // Build identity of this running server, so mission admission
+          // (J01 gate 3) can refuse an old build. Nulls mean unknown.
+          serverBuild: resolveServerBuild(),
           providers: providers.map((provider) => {
             const constraints = providerConstraints(
               provider,

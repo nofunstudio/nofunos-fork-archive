@@ -650,6 +650,19 @@ export const OrchestratorMcpProviderCapability = Schema.Struct({
 });
 export type OrchestratorMcpProviderCapability = typeof OrchestratorMcpProviderCapability.Type;
 
+/**
+ * Build identity of the running server executable: the git SHA of the built
+ * source plus the version stamped at build time. Null members mean the
+ * running server could not determine that value (no build env injected).
+ * Admission and the J01 runbook use the SHA as the build identity and the
+ * version only as an ordering diagnostic ("older" vs "not equal").
+ */
+export const OrchestratorMcpServerBuild = Schema.Struct({
+  sha: Schema.NullOr(Schema.String),
+  version: Schema.NullOr(Schema.String),
+});
+export type OrchestratorMcpServerBuild = typeof OrchestratorMcpServerBuild.Type;
+
 export const OrchestratorMcpCapabilitiesResult = Schema.Struct({
   /** The calling thread, or null when the caller is not a T3 thread. */
   parentThreadId: Schema.NullOr(ThreadId),
@@ -660,6 +673,12 @@ export const OrchestratorMcpCapabilitiesResult = Schema.Struct({
   interactionMode: ProviderInteractionMode,
   providers: Schema.Array(OrchestratorMcpProviderCapability),
   hostCapacity: Schema.optional(OrchestratorMcpHostCapacity),
+  /**
+   * Build identity of the running server executable, so admission (J01 gate
+   * 3) can refuse an old build. Optional so clients can still decode
+   * capability responses from older servers.
+   */
+  serverBuild: Schema.optional(OrchestratorMcpServerBuild),
   features: Schema.Struct({
     appOwnedSubagents: Schema.Boolean,
     asyncPolling: Schema.Boolean,
