@@ -24,6 +24,7 @@ import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Metric from "effect/Metric";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
@@ -3705,10 +3706,76 @@ it.effect(
 );
 
 it.effect(
+  "ProviderSessionManagerV2 detaches a thread its idle unload already unloaded exactly once",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const unloadStarted = yield* Deferred.make<void>();
+      const releaseUnload = yield* Deferred.make<void>();
+      const beforeUnload = Effect.gen(function* () {
+        yield* Deferred.succeed(unloadStarted, undefined);
+        yield* Deferred.await(releaseUnload);
+      });
+      const effect = Effect.gen(function* () {
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const settled = yield* settleSharedThread({
+          fixtureName: "provider-session-manager-thread-idle-detach-race",
+          state,
+        });
+        yield* TestClock.adjust("10 seconds");
+        yield* Effect.yieldNow;
+        // Same bounded park wait as the turn-start race test. The unload
+        // claimed its record (and holds the per-thread lock) before the
+        // detach below runs, so every detach timing hits the race: joining
+        // the in-flight unload, running fully before it, or after it.
+        yield* Effect.gen(function* () {
+          let steps = 0;
+          while (Option.isNone(yield* Deferred.poll(unloadStarted)) && steps < 8) {
+            yield* TestClock.adjust("500 millis");
+            yield* Effect.yieldNow;
+            steps += 1;
+          }
+        });
+        assert.isTrue(Option.isSome(yield* Deferred.poll(unloadStarted)));
+        // Detach removes the attachment while the idle unload is parked,
+        // joins it, then must skip its own unload: the adapter sees exactly
+        // one call no matter which side wins. Unfixed, detach unloads again
+        // after the join and the adapter sees two.
+        const detached = yield* manager
+          .detach({ providerSessionId: settled.providerSessionId, threadId: settled.threadId })
+          .pipe(Effect.forkScoped);
+        yield* Effect.yieldNow;
+        yield* Effect.yieldNow;
+        yield* Deferred.succeed(releaseUnload, undefined);
+        yield* Fiber.join(detached);
+        assert.deepEqual((yield* Ref.get(state)).unloadedNativeThreadIds, ["native-thread"]);
+        // The shared runtime stays up for the other thread.
+        assert.isTrue(Option.isSome(yield* manager.get(settled.providerSessionId)));
+        assert.equal((yield* Ref.get(state)).closeCount, 0);
+      });
+
+      yield* effect.pipe(
+        Effect.provide(
+          layerTest({ state, idleTimeoutMs: 60_000, threadIdleUnloadMs: 1000, beforeUnload }),
+        ),
+        Effect.scoped,
+      );
+    }),
+);
+
+it.effect(
   "ProviderSessionManagerV2 cancels a pending thread idle unload when its session releases",
   () =>
     Effect.gen(function* () {
       const state = yield* Ref.make(emptyState);
+      // Release logs every per-thread timer it terminates; without the
+      // lifecycle fix the armed timer survives release and fires (a no-op
+      // against the removed session), so this log is the observable proof
+      // the fiber was actually interrupted rather than merely unfired.
+      const logs: Array<unknown> = [];
+      const logger = Logger.make(({ message }) => {
+        logs.push(message);
+      });
       const effect = Effect.gen(function* () {
         const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
         const settled = yield* settleSharedThread({
@@ -3728,10 +3795,31 @@ it.effect(
         yield* Effect.yieldNow;
         assert.deepEqual((yield* Ref.get(state)).unloadedNativeThreadIds, []);
         assert.equal((yield* Ref.get(state)).closeCount, 1);
+        // The release terminated the armed timer instead of leaving it
+        // behind: exactly one cancellation was logged for this thread, in
+        // the armed phase.
+        const cancelled = logs.flatMap((entry) => {
+          if (!Array.isArray(entry)) {
+            return [];
+          }
+          const [text, fields] = entry as Array<unknown>;
+          if (text !== "orchestration-v2.provider-session.thread-idle-unload-cancelled") {
+            return [];
+          }
+          return [fields as { readonly threadId?: unknown; readonly phase?: unknown }];
+        });
+        assert.equal(cancelled.length, 1);
+        assert.deepEqual(cancelled[0]?.threadId, String(settled.threadId));
+        assert.deepEqual(cancelled[0]?.phase, "armed");
       });
 
       yield* effect.pipe(
-        Effect.provide(layerTest({ state, idleTimeoutMs: 60_000, threadIdleUnloadMs: 1000 })),
+        Effect.provide(
+          Layer.merge(
+            layerTest({ state, idleTimeoutMs: 60_000, threadIdleUnloadMs: 1000 }),
+            Logger.layer([logger], { mergeWithExisting: false }),
+          ),
+        ),
       );
     }),
 );

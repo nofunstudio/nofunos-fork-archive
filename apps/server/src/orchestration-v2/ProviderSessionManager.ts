@@ -229,6 +229,13 @@ interface LiveSessionEntry {
    */
   readonly threadIdleUnloadByThread: ReadonlyMap<ThreadId, ThreadIdleUnloadRecord>;
   /**
+   * Threads whose native state the idle unload already tore down, with no
+   * reload since. Lets detach skip a thread the idle unload already
+   * unloaded instead of unloading it a second time. Cleared whenever the
+   * thread's native state is (re)established.
+   */
+  readonly idleUnloadedThreadIds: ReadonlySet<ThreadId>;
+  /**
    * Owner app thread per native provider thread, so a turn.terminal event
    * (which carries no app thread id) can route the settle to its thread.
    */
@@ -956,10 +963,24 @@ export const layerWithOptions = (
                   // them. Interrupt every still-armed timer and join every
                   // in-flight unload before the runtime closes, so no timer
                   // outlives its session and no unload touches a released
-                  // runtime.
+                  // runtime. Fiber.interrupt waits for termination, so the
+                  // log below observes a dead timer, not a request.
                   yield* Effect.forEach(
-                    [...entry.threadIdleUnloadByThread.values()],
-                    (record) => Fiber.interrupt(record.fiber).pipe(Effect.ignore),
+                    [...entry.threadIdleUnloadByThread.entries()],
+                    ([threadId, record]) =>
+                      Fiber.interrupt(record.fiber).pipe(
+                        Effect.ignore,
+                        Effect.andThen(
+                          Effect.logInfo(
+                            "orchestration-v2.provider-session.thread-idle-unload-cancelled",
+                            {
+                              providerSessionId: input.providerSessionId,
+                              threadId,
+                              phase: record.phase,
+                            },
+                          ),
+                        ),
+                      ),
                     { concurrency: "unbounded", discard: true },
                   );
                   if (input.gracefulSubscribers === true) {
@@ -1467,6 +1488,22 @@ export const layerWithOptions = (
               ),
             { concurrency: 1, discard: true },
           );
+          // The native state is gone (until the next reload clears this
+          // mark): a racing detach must skip its own unload for this thread.
+          yield* Ref.update(sessions, (current) => {
+            const latestEntry = current.get(key);
+            if (latestEntry?.runtime !== entry.runtime) {
+              return current;
+            }
+            if (latestEntry.idleUnloadedThreadIds.has(input.threadId)) {
+              return current;
+            }
+            const idleUnloadedThreadIds = new Set(latestEntry.idleUnloadedThreadIds);
+            idleUnloadedThreadIds.add(input.threadId);
+            const updated = new Map(current);
+            updated.set(key, { ...latestEntry, idleUnloadedThreadIds });
+            return updated;
+          });
         }).pipe(
           Effect.ensuring(
             Ref.update(sessions, (current) => {
@@ -1629,8 +1666,12 @@ export const layerWithOptions = (
           }
           const loadedProviderThreadKeyByThread = new Map(entry.loadedProviderThreadKeyByThread);
           loadedProviderThreadKeyByThread.set(input.threadId, input.providerThreadKey);
+          // The native state is resident again: a past idle unload no longer
+          // describes this thread.
+          const idleUnloadedThreadIds = new Set(entry.idleUnloadedThreadIds);
+          idleUnloadedThreadIds.delete(input.threadId);
           const updated = new Map(current);
-          updated.set(key, { ...entry, loadedProviderThreadKeyByThread });
+          updated.set(key, { ...entry, loadedProviderThreadKeyByThread, idleUnloadedThreadIds });
           return updated;
         });
 
@@ -2352,6 +2393,7 @@ export const layerWithOptions = (
                 attachedThreadIds: new Set([input.threadId]),
                 loadedProviderThreadKeyByThread: new Map(),
                 threadIdleUnloadByThread: new Map(),
+                idleUnloadedThreadIds: new Set(),
                 appThreadIdByProviderThreadId: new Map(),
                 mcpCredentialIdByThread:
                   mcpCredentialId === undefined
@@ -2589,9 +2631,18 @@ export const layerWithOptions = (
                 Effect.gen(function* () {
                   const entry = (yield* Ref.get(sessions)).get(key);
                   if (
-                    entry?.runtime !== detached.value.runtime ||
+                    entry === undefined ||
+                    entry.runtime !== detached.value.runtime ||
                     entry.attachedThreadIds.has(input.threadId)
                   ) {
+                    return;
+                  }
+                  // The idle unload already tore this thread down (and the
+                  // join above waited it out, or it finished just before
+                  // this detach): unloading again would be a second provider
+                  // call for the same native state. A reload since would
+                  // have cleared the mark.
+                  if (entry.idleUnloadedThreadIds.has(input.threadId)) {
                     return;
                   }
                   yield* Effect.forEach(
@@ -2615,6 +2666,22 @@ export const layerWithOptions = (
                       ),
                     { concurrency: 1, discard: true },
                   );
+                  // Remember the unload, so a later detach after a bare
+                  // re-attach (no reload) also skips it.
+                  yield* Ref.update(sessions, (current) => {
+                    const latestEntry = current.get(key);
+                    if (latestEntry?.runtime !== detached.value.runtime) {
+                      return current;
+                    }
+                    if (latestEntry.idleUnloadedThreadIds.has(input.threadId)) {
+                      return current;
+                    }
+                    const idleUnloadedThreadIds = new Set(latestEntry.idleUnloadedThreadIds);
+                    idleUnloadedThreadIds.add(input.threadId);
+                    const updated = new Map(current);
+                    updated.set(key, { ...latestEntry, idleUnloadedThreadIds });
+                    return updated;
+                  });
                 }),
               );
             }
