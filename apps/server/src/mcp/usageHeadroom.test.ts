@@ -174,4 +174,332 @@ describe("usageHeadroom", () => {
       ),
     ).toEqual({ headroom: "unknown", summary: "usage not reported" });
   });
+
+  it("trusts a 45-minute-old passive observation while its 5h window has not reset", () => {
+    const result = usageHeadroom(
+      {
+        checkedAt: at(-45),
+        windows: [window("session", 40, 240), window("weekly", 10, 900)],
+      },
+      NOW,
+      { trustUnresetWindow: true },
+    );
+    expect(result.headroom).toBe("ok");
+    expect(result.summary).toContain("5h 60% left");
+    expect(result.summary).toContain("observed 45m ago");
+  });
+
+  it("keeps a stale passive observation admissible after its window reset, from the weekly value", () => {
+    const result = usageHeadroom(
+      {
+        checkedAt: at(-120),
+        windows: [window("session", 40, -30), window("weekly", 10, 900)],
+      },
+      NOW,
+      { trustUnresetWindow: true },
+    );
+    expect(result.headroom).toBe("ok");
+    expect(result.summary).toContain("weekly 90% left");
+  });
+
+  it("reports unknown when every window reset without a weekly window", () => {
+    const result = usageHeadroom(
+      {
+        checkedAt: at(-400),
+        windows: [window("session", 40, -30)],
+      },
+      NOW,
+      { trustUnresetWindow: true },
+    );
+    expect(result.headroom).toBe("unknown");
+    expect(result.summary).toContain("weekly window");
+  });
+
+  it("expires the all-reset passive trust one weekly period past the observation", () => {
+    const allResetAgo = (checkedAgoMinutes: number) => ({
+      checkedAt: at(-checkedAgoMinutes),
+      windows: [window("session", 40, -60), window("weekly", 10, -30)],
+    });
+    const GRACE_MINUTES = 7 * 24 * 60;
+    const inside = usageHeadroom(allResetAgo(GRACE_MINUTES), NOW, {
+      trustUnresetWindow: true,
+    });
+    expect(inside.headroom).toBe("ok");
+    expect(inside.summary).toContain("weekly 90% left");
+    const outside = usageHeadroom(allResetAgo(GRACE_MINUTES + 1), NOW, {
+      trustUnresetWindow: true,
+    });
+    expect(outside.headroom).toBe("unknown");
+  });
+
+  it("reads a multi-week-old healthy passive observation as unknown", () => {
+    const result = usageHeadroom(
+      {
+        checkedAt: at(-21 * 24 * 60),
+        windows: [window("session", 40, -30), window("weekly", 10, -60)],
+      },
+      NOW,
+      { trustUnresetWindow: true },
+    );
+    expect(result.headroom).toBe("unknown");
+  });
+
+  it("keeps observed low and exhausted sticky past the passive grace", () => {
+    const aged = (usedPercent: number) => ({
+      checkedAt: at(-21 * 24 * 60),
+      windows: [window("session", usedPercent, -30), window("weekly", 10, -60)],
+    });
+    expect(usageHeadroom(aged(90), NOW, { trustUnresetWindow: true }).headroom).toBe("low");
+    expect(usageHeadroom(aged(100), NOW, { trustUnresetWindow: true }).headroom).toBe("exhausted");
+  });
+
+  it("still reports low and exhausted from a stale passive observation", () => {
+    const staleLow = {
+      checkedAt: at(-45),
+      windows: [window("session", 90, 240), window("weekly", 10, 900)],
+    };
+    expect(usageHeadroom(staleLow, NOW, { trustUnresetWindow: true }).headroom).toBe("low");
+    const staleSpent = {
+      checkedAt: at(-120),
+      windows: [window("session", 100, -30), window("weekly", 10, 900)],
+    };
+    expect(usageHeadroom(staleSpent, NOW, { trustUnresetWindow: true }).headroom).toBe("exhausted");
+  });
+
+  it("stays strict without the passive opt-in", () => {
+    expect(
+      usageHeadroom(
+        {
+          checkedAt: at(-45),
+          windows: [window("session", 40, 240), window("weekly", 10, 900)],
+        },
+        NOW,
+      ).headroom,
+    ).toBe("unknown");
+  });
+
+  it("trusts Muse only by one positive allow-rule across corrupt fields and ages", () => {
+    const AGES = [
+      { label: "1h", minutes: 60, expectBaselineOk: true },
+      { label: "6d", minutes: 6 * 24 * 60, expectBaselineOk: true },
+      { label: "7d+1m", minutes: 7 * 24 * 60 + 1, expectBaselineOk: false },
+      { label: "21d", minutes: 21 * 24 * 60, expectBaselineOk: false },
+      { label: "378d", minutes: 378 * 24 * 60, expectBaselineOk: false },
+    ] as const;
+    const healthySession = (resetsInMinutes: number | undefined) =>
+      resetsInMinutes === undefined
+        ? {
+            id: "session-5h",
+            kind: "session" as const,
+            label: "session" as const,
+            usedPercent: 40,
+          }
+        : window("session", 40, resetsInMinutes);
+    const healthyWeekly = (resetsInMinutes: number | undefined) =>
+      resetsInMinutes === undefined
+        ? {
+            id: "weekly-weekly",
+            kind: "weekly" as const,
+            label: "weekly" as const,
+            usedPercent: 10,
+          }
+        : window("weekly", 10, resetsInMinutes);
+    type Variant = {
+      readonly name: string;
+      readonly build: (ageMinutes: number) => any;
+      readonly okWhenYoung: boolean;
+    };
+    const variants: Variant[] = [
+      {
+        name: "valid baseline",
+        build: (age) => ({
+          checkedAt: at(-age),
+          windows: [healthySession(240), healthyWeekly(6 * 24 * 60)],
+        }),
+        okWhenYoung: true,
+      },
+      {
+        name: "missing checkedAt",
+        build: (_age) => ({
+          checkedAt: undefined,
+          windows: [healthySession(240), healthyWeekly(6 * 24 * 60)],
+        }),
+        okWhenYoung: false,
+      },
+      {
+        name: "invalid checkedAt",
+        build: (_age) => ({
+          checkedAt: "not-a-date",
+          windows: [healthySession(240), healthyWeekly(6 * 24 * 60)],
+        }),
+        okWhenYoung: false,
+      },
+      {
+        name: "future checkedAt",
+        build: (_age) => ({
+          checkedAt: at(60),
+          windows: [healthySession(240), healthyWeekly(6 * 24 * 60)],
+        }),
+        okWhenYoung: false,
+      },
+      {
+        name: "missing session window",
+        build: (age) => ({
+          checkedAt: at(-age),
+          windows: [healthyWeekly(6 * 24 * 60)],
+        }),
+        okWhenYoung: true,
+      },
+      {
+        name: "missing weekly window",
+        build: (age) => ({
+          checkedAt: at(-age),
+          windows: [healthySession(240)],
+        }),
+        okWhenYoung: false,
+      },
+      {
+        name: "no windows",
+        build: (age) => ({ checkedAt: at(-age), windows: [] }),
+        okWhenYoung: false,
+      },
+      {
+        name: "invalid session usedPercent",
+        build: (age) => ({
+          checkedAt: at(-age),
+          windows: [
+            { ...healthySession(240), usedPercent: Number.NaN },
+            healthyWeekly(6 * 24 * 60),
+          ],
+        }),
+        okWhenYoung: false,
+      },
+      {
+        name: "invalid weekly usedPercent",
+        build: (age) => ({
+          checkedAt: at(-age),
+          windows: [healthySession(240), { ...healthyWeekly(6 * 24 * 60), usedPercent: 101 }],
+        }),
+        okWhenYoung: false,
+      },
+      {
+        name: "missing session resetsAt",
+        build: (age) => ({
+          checkedAt: at(-age),
+          windows: [healthySession(undefined), healthyWeekly(6 * 24 * 60)],
+        }),
+        okWhenYoung: true,
+      },
+      {
+        name: "invalid session resetsAt",
+        build: (age) => ({
+          checkedAt: at(-age),
+          windows: [{ ...healthySession(240), resetsAt: "bad-date" }, healthyWeekly(6 * 24 * 60)],
+        }),
+        okWhenYoung: false,
+      },
+      {
+        name: "missing weekly resetsAt (R3)",
+        build: (age) => ({
+          checkedAt: at(-age),
+          windows: [healthySession(240), healthyWeekly(undefined)],
+        }),
+        okWhenYoung: false,
+      },
+      {
+        name: "invalid weekly resetsAt",
+        build: (age) => ({
+          checkedAt: at(-age),
+          windows: [healthySession(240), { ...healthyWeekly(6 * 24 * 60), resetsAt: "bad-date" }],
+        }),
+        okWhenYoung: false,
+      },
+      {
+        name: "expired weekly resetsAt",
+        build: (age) => ({
+          checkedAt: at(-age),
+          windows: [healthySession(240), healthyWeekly(-8 * 24 * 60)],
+        }),
+        okWhenYoung: false,
+      },
+      {
+        name: "multiple weekly rows one missing resetsAt (R4)",
+        build: (age) => ({
+          checkedAt: at(-age),
+          windows: [
+            healthySession(240),
+            healthyWeekly(6 * 24 * 60),
+            { ...healthyWeekly(undefined), id: "weekly-second" },
+          ],
+        }),
+        okWhenYoung: false,
+      },
+      {
+        name: "multiple weekly rows one garbage resetsAt (R4)",
+        build: (age) => ({
+          checkedAt: at(-age),
+          windows: [
+            healthySession(240),
+            healthyWeekly(6 * 24 * 60),
+            { ...healthyWeekly(6 * 24 * 60), id: "weekly-second", resetsAt: "garbage" },
+          ],
+        }),
+        okWhenYoung: false,
+      },
+      {
+        name: "multiple weekly rows tightest bound wins (R4)",
+        build: (age) => ({
+          checkedAt: at(-age),
+          windows: [
+            healthySession(240),
+            healthyWeekly(6 * 24 * 60),
+            { ...healthyWeekly(-8 * 24 * 60), id: "weekly-second" },
+          ],
+        }),
+        okWhenYoung: false,
+      },
+      {
+        name: "duplicate valid weekly rows (R4)",
+        build: (age) => ({
+          checkedAt: at(-age),
+          windows: [
+            healthySession(240),
+            healthyWeekly(6 * 24 * 60),
+            { ...healthyWeekly(6 * 24 * 60), id: "weekly-second" },
+          ],
+        }),
+        okWhenYoung: true,
+      },
+      {
+        name: "weekly reset exactly at the 7d bound (R4)",
+        build: (age) => ({
+          checkedAt: at(-age),
+          windows: [healthySession(240), healthyWeekly(-7 * 24 * 60)],
+        }),
+        okWhenYoung: true,
+      },
+      {
+        name: "weekly reset just past the 7d bound (R4)",
+        build: (age) => ({
+          checkedAt: at(-age),
+          windows: [healthySession(240), healthyWeekly(-7 * 24 * 60 - 1)],
+        }),
+        okWhenYoung: false,
+      },
+    ];
+    for (const age of AGES) {
+      for (const variant of variants) {
+        const limits = variant.build(age.minutes);
+        const result = usageHeadroom(limits, NOW, { trustUnresetWindow: true });
+        const shouldOk = variant.okWhenYoung && age.expectBaselineOk;
+        if (shouldOk) {
+          expect(result.headroom, `${variant.name} at ${age.label} should be ok`).toBe("ok");
+        } else {
+          expect(result.headroom, `${variant.name} at ${age.label} should be unknown`).toBe(
+            "unknown",
+          );
+        }
+      }
+    }
+  });
 });

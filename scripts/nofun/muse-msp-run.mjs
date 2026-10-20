@@ -476,7 +476,9 @@ export async function runMsp({ executable, argv, env, expectedLogin, emit }) {
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   if (process.argv[2] === "--usage-status") {
     try {
-      const path = process.argv[3] ?? join(homedir(), ".nofun-t3", "muse-accounts.json");
+      const path =
+        (process.argv[3] ?? process.env.NOFUN_MUSE_ACCOUNTS?.trim()) ||
+        join(homedir(), ".nofun-t3", "muse-accounts.json");
       process.stdout.write(JSON.stringify(readUsageStatus(path)) + "\n");
     } catch {
       process.stderr.write("Muse usage registry unavailable.\n");

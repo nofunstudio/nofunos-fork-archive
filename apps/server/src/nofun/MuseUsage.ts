@@ -16,8 +16,9 @@
  * persisted, bound to their account and source ids with no launchers, roots,
  * or credentials; restore and restart reject anything bound otherwise.
  *
- * Accounts come from `~/.nofun-t3/muse-accounts.json`; without that file
- * usage is off and nothing is read or written.
+ * Accounts come from `muse-accounts.json` in the T3 home actually in use
+ * (`NOFUN_MUSE_ACCOUNTS` overrides); without that file usage is off and
+ * nothing is read or written.
  *
  * @module MuseUsage
  */
@@ -104,9 +105,12 @@ const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const config = yield* ServerConfig.ServerConfig;
 
+  // The registry lives in the T3 home actually in use (`config.baseDir`),
+  // never a hardcoded home: machines with a relocated home (M1) keep their
+  // own registry and observations beside it. The kept native observations
+  // directory below derives from this path, so it follows automatically.
   const accountsPath =
-    process.env.NOFUN_MUSE_ACCOUNTS?.trim() ||
-    path.join(NodeOS.homedir(), ".nofun-t3", "muse-accounts.json");
+    process.env.NOFUN_MUSE_ACCOUNTS?.trim() || path.join(config.baseDir, "muse-accounts.json");
   const personaId = readNofunPersonaScope()?.info.id ?? "nofun";
   const observationsDir = path.join(config.stateDir, "nofun", "muse-usage");
 
