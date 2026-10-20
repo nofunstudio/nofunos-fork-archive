@@ -215,7 +215,7 @@ describe("usageHeadroom", () => {
     expect(result.summary).toContain("weekly window");
   });
 
-  it("expires the all-reset passive grace one weekly period past the observation", () => {
+  it("expires the all-reset passive trust one weekly period past the observation", () => {
     const allResetAgo = (checkedAgoMinutes: number) => ({
       checkedAt: at(-checkedAgoMinutes),
       windows: [window("session", 40, -60), window("weekly", 10, -30)],
@@ -225,7 +225,7 @@ describe("usageHeadroom", () => {
       trustUnresetWindow: true,
     });
     expect(inside.headroom).toBe("ok");
-    expect(inside.summary).toContain("likely fresh");
+    expect(inside.summary).toContain("weekly 90% left");
     const outside = usageHeadroom(allResetAgo(GRACE_MINUTES + 1), NOW, {
       trustUnresetWindow: true,
     });
@@ -276,5 +276,166 @@ describe("usageHeadroom", () => {
         NOW,
       ).headroom,
     ).toBe("unknown");
+  });
+
+  it("trusts Muse only by one positive allow-rule across corrupt fields and ages", () => {
+    const AGES = [
+      { label: "1h", minutes: 60, expectBaselineOk: true },
+      { label: "6d", minutes: 6 * 24 * 60, expectBaselineOk: true },
+      { label: "7d+1m", minutes: 7 * 24 * 60 + 1, expectBaselineOk: false },
+      { label: "21d", minutes: 21 * 24 * 60, expectBaselineOk: false },
+      { label: "378d", minutes: 378 * 24 * 60, expectBaselineOk: false },
+    ] as const;
+    const healthySession = (resetsInMinutes: number | undefined) =>
+      resetsInMinutes === undefined
+        ? {
+            id: "session-5h",
+            kind: "session" as const,
+            label: "session" as const,
+            usedPercent: 40,
+          }
+        : window("session", 40, resetsInMinutes);
+    const healthyWeekly = (resetsInMinutes: number | undefined) =>
+      resetsInMinutes === undefined
+        ? {
+            id: "weekly-weekly",
+            kind: "weekly" as const,
+            label: "weekly" as const,
+            usedPercent: 10,
+          }
+        : window("weekly", 10, resetsInMinutes);
+    type Variant = {
+      readonly name: string;
+      readonly build: (ageMinutes: number) => any;
+      readonly okWhenYoung: boolean;
+    };
+    const variants: Variant[] = [
+      {
+        name: "valid baseline",
+        build: (age) => ({
+          checkedAt: at(-age),
+          windows: [healthySession(240), healthyWeekly(6 * 24 * 60)],
+        }),
+        okWhenYoung: true,
+      },
+      {
+        name: "missing checkedAt",
+        build: (_age) => ({
+          checkedAt: undefined,
+          windows: [healthySession(240), healthyWeekly(6 * 24 * 60)],
+        }),
+        okWhenYoung: false,
+      },
+      {
+        name: "invalid checkedAt",
+        build: (_age) => ({
+          checkedAt: "not-a-date",
+          windows: [healthySession(240), healthyWeekly(6 * 24 * 60)],
+        }),
+        okWhenYoung: false,
+      },
+      {
+        name: "future checkedAt",
+        build: (_age) => ({
+          checkedAt: at(60),
+          windows: [healthySession(240), healthyWeekly(6 * 24 * 60)],
+        }),
+        okWhenYoung: false,
+      },
+      {
+        name: "missing session window",
+        build: (age) => ({
+          checkedAt: at(-age),
+          windows: [healthyWeekly(6 * 24 * 60)],
+        }),
+        okWhenYoung: true,
+      },
+      {
+        name: "missing weekly window",
+        build: (age) => ({
+          checkedAt: at(-age),
+          windows: [healthySession(240)],
+        }),
+        okWhenYoung: false,
+      },
+      {
+        name: "no windows",
+        build: (age) => ({ checkedAt: at(-age), windows: [] }),
+        okWhenYoung: false,
+      },
+      {
+        name: "invalid session usedPercent",
+        build: (age) => ({
+          checkedAt: at(-age),
+          windows: [
+            { ...healthySession(240), usedPercent: Number.NaN },
+            healthyWeekly(6 * 24 * 60),
+          ],
+        }),
+        okWhenYoung: false,
+      },
+      {
+        name: "invalid weekly usedPercent",
+        build: (age) => ({
+          checkedAt: at(-age),
+          windows: [healthySession(240), { ...healthyWeekly(6 * 24 * 60), usedPercent: 101 }],
+        }),
+        okWhenYoung: false,
+      },
+      {
+        name: "missing session resetsAt",
+        build: (age) => ({
+          checkedAt: at(-age),
+          windows: [healthySession(undefined), healthyWeekly(6 * 24 * 60)],
+        }),
+        okWhenYoung: true,
+      },
+      {
+        name: "invalid session resetsAt",
+        build: (age) => ({
+          checkedAt: at(-age),
+          windows: [{ ...healthySession(240), resetsAt: "bad-date" }, healthyWeekly(6 * 24 * 60)],
+        }),
+        okWhenYoung: false,
+      },
+      {
+        name: "missing weekly resetsAt (R3)",
+        build: (age) => ({
+          checkedAt: at(-age),
+          windows: [healthySession(240), healthyWeekly(undefined)],
+        }),
+        okWhenYoung: false,
+      },
+      {
+        name: "invalid weekly resetsAt",
+        build: (age) => ({
+          checkedAt: at(-age),
+          windows: [healthySession(240), { ...healthyWeekly(6 * 24 * 60), resetsAt: "bad-date" }],
+        }),
+        okWhenYoung: false,
+      },
+      {
+        name: "expired weekly resetsAt",
+        build: (age) => ({
+          checkedAt: at(-age),
+          windows: [healthySession(240), healthyWeekly(-8 * 24 * 60)],
+        }),
+        okWhenYoung: false,
+      },
+    ];
+    for (const age of AGES) {
+      for (const variant of variants) {
+        const limits = variant.build(age.minutes);
+        const result = usageHeadroom(limits, NOW, { trustUnresetWindow: true });
+        const shouldOk = variant.okWhenYoung && age.expectBaselineOk;
+        if (shouldOk) {
+          expect(result.headroom, `${variant.name} at ${age.label} should be ok`).toBe("ok");
+        } else {
+          expect(result.headroom, `${variant.name} at ${age.label} should be unknown`).toBe(
+            "unknown",
+          );
+        }
+      }
+    }
   });
 });

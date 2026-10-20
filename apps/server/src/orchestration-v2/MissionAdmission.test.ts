@@ -378,6 +378,141 @@ describe("MissionAdmission", () => {
     );
   });
 
+  it("refuses every Muse reading that fails the single allow-rule", () => {
+    const ages = [
+      { label: "1h", ms: 60 * 60_000, young: true },
+      { label: "6d", ms: 6 * 24 * 60 * 60_000, young: true },
+      { label: "7d+1m", ms: 7 * 24 * 60 * 60_000 + 60_000, young: false },
+      { label: "21d", ms: 21 * 24 * 60 * 60_000, young: false },
+      { label: "378d", ms: 378 * 24 * 60 * 60_000, young: false },
+    ] as const;
+    const session = (resetsAt: string | undefined) => ({
+      id: "five_hour",
+      kind: "session" as const,
+      label: "5h",
+      usedPercent: 40,
+      ...(resetsAt === undefined ? {} : { resetsAt }),
+    });
+    const weekly = (usedPercent: number, resetsAt: string | undefined) => ({
+      id: "weekly",
+      kind: "weekly" as const,
+      label: "weekly",
+      usedPercent,
+      ...(resetsAt === undefined ? {} : { resetsAt }),
+    });
+    const validWeeklyReset = iso(NOW_MS + 6 * 24 * 60 * 60_000);
+    const expiredWeeklyReset = iso(NOW_MS - 8 * 24 * 60 * 60_000);
+    type Variant = {
+      readonly name: string;
+      readonly build: (ageMs: number) => any;
+      readonly okWhenYoung: boolean;
+    };
+    const variants: Variant[] = [
+      {
+        name: "valid baseline",
+        build: (ageMs) => ({
+          checkedAt: iso(NOW_MS - ageMs),
+          windows: [session(iso(NOW_MS + 240 * 60_000)), weekly(10, validWeeklyReset)],
+        }),
+        okWhenYoung: true,
+      },
+      {
+        name: "missing checkedAt",
+        build: (_ageMs) => ({
+          checkedAt: undefined,
+          windows: [session(iso(NOW_MS + 240 * 60_000)), weekly(10, validWeeklyReset)],
+        }),
+        okWhenYoung: false,
+      },
+      {
+        name: "invalid checkedAt",
+        build: (_ageMs) => ({
+          checkedAt: "not-a-date",
+          windows: [session(iso(NOW_MS + 240 * 60_000)), weekly(10, validWeeklyReset)],
+        }),
+        okWhenYoung: false,
+      },
+      {
+        name: "future checkedAt",
+        build: (_ageMs) => ({
+          checkedAt: iso(NOW_MS + 60_000),
+          windows: [session(iso(NOW_MS + 240 * 60_000)), weekly(10, validWeeklyReset)],
+        }),
+        okWhenYoung: false,
+      },
+      {
+        name: "missing session window",
+        build: (ageMs) => ({
+          checkedAt: iso(NOW_MS - ageMs),
+          windows: [weekly(10, validWeeklyReset)],
+        }),
+        okWhenYoung: true,
+      },
+      {
+        name: "missing weekly window",
+        build: (ageMs) => ({
+          checkedAt: iso(NOW_MS - ageMs),
+          windows: [session(iso(NOW_MS + 240 * 60_000))],
+        }),
+        okWhenYoung: false,
+      },
+      {
+        name: "missing weekly resetsAt (R3)",
+        build: (ageMs) => ({
+          checkedAt: iso(NOW_MS - ageMs),
+          windows: [session(iso(NOW_MS + 240 * 60_000)), weekly(10, undefined)],
+        }),
+        okWhenYoung: false,
+      },
+      {
+        name: "invalid weekly resetsAt",
+        build: (ageMs) => ({
+          checkedAt: iso(NOW_MS - ageMs),
+          windows: [session(iso(NOW_MS + 240 * 60_000)), weekly(10, "bad-date")],
+        }),
+        okWhenYoung: false,
+      },
+      {
+        name: "expired weekly resetsAt",
+        build: (ageMs) => ({
+          checkedAt: iso(NOW_MS - ageMs),
+          windows: [session(iso(NOW_MS + 240 * 60_000)), weekly(10, expiredWeeklyReset)],
+        }),
+        okWhenYoung: false,
+      },
+      {
+        name: "missing session resetsAt",
+        build: (ageMs) => ({
+          checkedAt: iso(NOW_MS - ageMs),
+          windows: [session(undefined), weekly(10, validWeeklyReset)],
+        }),
+        okWhenYoung: true,
+      },
+    ];
+    for (const age of ages) {
+      for (const variant of variants) {
+        const usageLimits = variant.build(age.ms) as ServerProviderUsageLimits;
+        const facts = {
+          ...factsFixture(),
+          usageSource: "muse" as const,
+          usageLimits,
+        };
+        const shouldAdmit = variant.okWhenYoung && age.young;
+        const result = decideMissionAdmission(requestFixture(), facts);
+        if (shouldAdmit) {
+          assert.isTrue(Result.isSuccess(result), `${variant.name} at ${age.label} should admit`);
+        } else {
+          assert.isTrue(Result.isFailure(result), `${variant.name} at ${age.label} should refuse`);
+          assert.strictEqual(
+            Result.isFailure(result) ? result.failure.code : "unreachable",
+            "usage_unknown",
+            `${variant.name} at ${age.label} should be usage_unknown`,
+          );
+        }
+      }
+    }
+  });
+
   it.each([
     "gpt-5.6",
     "gpt-5.6-sol",
