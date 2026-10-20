@@ -20,6 +20,13 @@ import {
   getProjectSortTimestamp,
   getSidebarForkParentThreadId,
   getSidebarThreadIdsToPrewarm,
+  groupSidebarSubagentChildren,
+  isSidebarSubagentChildRunning,
+  resolveSidebarSubagentDisclosureLabel,
+  sidebarSubagentParentKey,
+  sliceSidebarSubagentChildren,
+  sortSidebarSubagentChildren,
+  SIDEBAR_SUBAGENT_CHILD_COLLAPSED_COUNT,
   hasUnseenCompletion,
   isContextMenuPointerDown,
   isSidebarSubagentThread,
@@ -2314,5 +2321,122 @@ describe("Working shelf (beta)", () => {
         unsnooze: false,
       });
     });
+  });
+});
+
+describe("sidebar subagent children", () => {
+  const parentId = ThreadId.make("thread-subagent-parent");
+  const runningRuntime = {
+    status: "running" as const,
+    activeRunId: null,
+    providerInstanceId: ProviderInstanceId.make("codex"),
+    providerName: "Codex",
+    lastError: null,
+    updatedAt: "2026-10-20T12:00:00.000Z",
+  };
+
+  function makeChild(id: string, overrides: ThreadFixtureOverrides = {}): Thread {
+    return makeThread({
+      id: ThreadId.make(id),
+      lineage: {
+        rootThreadId: parentId,
+        parentThreadId: parentId,
+        relationshipToParent: "subagent",
+      },
+      ...overrides,
+    });
+  }
+
+  it("groups live subagent children under their parent and ignores inherited pins", () => {
+    const parent = makeThread({ id: parentId });
+    const plain = makeChild("thread-subagent-plain");
+    // An older child that copied its parent's pin and settle fields at
+    // creation still lists as a plain child: those fields are never read.
+    const inheritedPin = makeChild("thread-subagent-inherited-pin", {
+      pinnedAt: "2026-10-20T11:00:00.000Z",
+      pinOrderKey: "a0",
+      settledOverride: "settled",
+    });
+    const archived = makeChild("thread-subagent-archived", {
+      archivedAt: "2026-10-20T11:30:00.000Z",
+    });
+    const fork = makeThread({
+      id: ThreadId.make("thread-fork"),
+      lineage: {
+        rootThreadId: parentId,
+        parentThreadId: parentId,
+        relationshipToParent: "fork",
+      },
+    });
+    const unrelated = makeThread({ id: ThreadId.make("thread-unrelated") });
+
+    const groups = groupSidebarSubagentChildren([
+      parent,
+      plain,
+      inheritedPin,
+      archived,
+      fork,
+      unrelated,
+    ]);
+    expect([...groups.keys()]).toEqual([
+      sidebarSubagentParentKey(localEnvironmentId, parentId),
+    ]);
+    expect(groups.get(sidebarSubagentParentKey(localEnvironmentId, parentId))?.map((thread) => thread.id)).toEqual([
+      plain.id,
+      inheritedPin.id,
+    ]);
+  });
+
+  it("keeps subagent children out of the visible sidebar rows", () => {
+    const parent = makeThread({ id: parentId });
+    const child = makeChild("thread-subagent-hidden");
+    expect(
+      filterSidebarV2VisibleThreads([parent, child], null).map((thread) => thread.id),
+    ).toEqual([parentId]);
+  });
+
+  it("orders running children first, then most recent", () => {
+    const oldRunning = makeChild("thread-subagent-old-running", {
+      latestUserMessageAt: "2026-10-20T09:00:00.000Z",
+      runtime: runningRuntime,
+    });
+    const newerIdle = makeChild("thread-subagent-newer-idle", {
+      latestUserMessageAt: "2026-10-20T11:00:00.000Z",
+    });
+    const oldestIdle = makeChild("thread-subagent-oldest-idle", {
+      latestUserMessageAt: "2026-10-20T08:00:00.000Z",
+    });
+
+    expect(isSidebarSubagentChildRunning(oldRunning)).toBe(true);
+    expect(isSidebarSubagentChildRunning(newerIdle)).toBe(false);
+    expect(
+      sortSidebarSubagentChildren([oldestIdle, newerIdle, oldRunning]).map(
+        (thread) => thread.id,
+      ),
+    ).toEqual([oldRunning.id, newerIdle.id, oldestIdle.id]);
+  });
+
+  it("caps the collapsed list and shows all on expansion", () => {
+    expect(SIDEBAR_SUBAGENT_CHILD_COLLAPSED_COUNT).toBe(5);
+    const children = Array.from({ length: 6 }, (_, index) =>
+      makeChild(`thread-subagent-${index}`, {
+        latestUserMessageAt: `2026-10-20T10:0${index}:00.000Z`,
+      }),
+    );
+    const ordered = sortSidebarSubagentChildren(children);
+    expect(sliceSidebarSubagentChildren(ordered, false).map((thread) => thread.id)).toEqual(
+      ordered.slice(0, 5).map((thread) => thread.id),
+    );
+    expect(sliceSidebarSubagentChildren(ordered, true)).toHaveLength(6);
+  });
+
+  it("labels the disclosure with the agent count and running count", () => {
+    expect(resolveSidebarSubagentDisclosureLabel({ total: 3, running: 1 })).toBe(
+      "3 agents (1 running)",
+    );
+    expect(resolveSidebarSubagentDisclosureLabel({ total: 1, running: 0 })).toBe("1 agent");
+    expect(resolveSidebarSubagentDisclosureLabel({ total: 2, running: 2 })).toBe(
+      "2 agents (2 running)",
+    );
   });
 });

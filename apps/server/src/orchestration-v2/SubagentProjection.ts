@@ -75,6 +75,11 @@ export function makeSubagentChildThread(input: {
     createdAt: input.now,
     updatedAt: input.now,
     archivedAt: null,
+    // A delegated child starts its own lifecycle: it must not inherit the
+    // parent's pin or settlement, which would surface it in shelves it does
+    // not belong to.
+    pinnedAt: null,
+    pinOrderKey: null,
     settledOverride: null,
     settledAt: null,
     snoozedUntil: null,

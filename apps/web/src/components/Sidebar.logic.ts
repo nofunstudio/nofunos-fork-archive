@@ -23,6 +23,7 @@ import {
   type ThreadSortInput,
 } from "../lib/threadSort";
 import type { SidebarThreadSummary, Thread } from "../types";
+import { threadActivityMs } from "../nofun/sidebar/teams";
 import { cn } from "../lib/utils";
 import { isLatestRunSettled } from "../session-logic";
 import { resolveServerBackedAppStageLabel } from "../branding.logic";
@@ -591,6 +592,108 @@ export function getSidebarForkParentThreadId(
   return thread.forkedFrom?.type === "run"
     ? thread.forkedFrom.threadId
     : thread.lineage.parentThreadId;
+}
+
+// ── Sidebar subagent children ─────────────────────────────────────
+// Delegated subagent threads stay out of the sidebar roster (see
+// filterSidebarV2VisibleThreads) and surface under their parent row instead.
+
+/** Collapsed subagent lists show this many children before "show all". */
+export const SIDEBAR_SUBAGENT_CHILD_COLLAPSED_COUNT = 5;
+
+export type SidebarSubagentChildThread = Pick<
+  SidebarThreadSummary,
+  | "environmentId"
+  | "id"
+  | "archivedAt"
+  | "lineage"
+  | "latestUserMessageAt"
+  | "latestRun"
+  | "createdAt"
+  | "updatedAt"
+  | "hasPendingApprovals"
+  | "hasPendingUserInput"
+> & {
+  readonly runtime: { readonly status: string } | null;
+};
+
+/** Lookup key for a parent's subagent group: the parent's scoped thread key. */
+export function sidebarSubagentParentKey(
+  environmentId: string,
+  parentThreadId: string,
+): string {
+  return `${environmentId}:${parentThreadId}`;
+}
+
+/** A delegated child counts as running while its own status is working. */
+export function isSidebarSubagentChildRunning(
+  thread: Pick<SidebarThreadSummary, "hasPendingApprovals" | "hasPendingUserInput"> & {
+    readonly runtime: { readonly status: string } | null;
+  },
+): boolean {
+  if (thread.hasPendingApprovals || thread.hasPendingUserInput) return false;
+  return (
+    thread.runtime !== null &&
+    ["preparing", "queued", "starting", "running", "waiting"].includes(thread.runtime.status)
+  );
+}
+
+/** Subagent children grouped under their parent's sidebar key. Archived
+ * children stay out, and inherited pin/settle fields are never read, so a
+ * child that copied its parent's pinnedAt still lists as a plain child. */
+export function groupSidebarSubagentChildren<T extends SidebarSubagentChildThread>(
+  threads: readonly T[],
+): Map<string, T[]> {
+  const groups = new Map<string, T[]>();
+  for (const thread of threads) {
+    if (!isSidebarSubagentThread(thread)) continue;
+    if (thread.archivedAt !== null) continue;
+    const parentThreadId = thread.lineage.parentThreadId;
+    if (parentThreadId === null) continue;
+    const key = sidebarSubagentParentKey(thread.environmentId, parentThreadId);
+    const group = groups.get(key);
+    if (group) {
+      group.push(thread);
+    } else {
+      groups.set(key, [thread]);
+    }
+  }
+  return groups;
+}
+
+/** Running children first, then most recent activity. Ties keep input order. */
+export function sortSidebarSubagentChildren<T extends SidebarSubagentChildThread>(
+  children: readonly T[],
+): T[] {
+  return [...children]
+    .map((child, index) => ({ child, index }))
+    .sort((left, right) => {
+      const byRunning =
+        Number(isSidebarSubagentChildRunning(right.child)) -
+        Number(isSidebarSubagentChildRunning(left.child));
+      if (byRunning !== 0) return byRunning;
+      const byRecency = threadActivityMs(right.child) - threadActivityMs(left.child);
+      if (byRecency !== 0) return byRecency;
+      return left.index - right.index;
+    })
+    .map(({ child }) => child);
+}
+
+/** The visible slice of an ordered child list; expanded shows everything. */
+export function sliceSidebarSubagentChildren<T>(
+  children: readonly T[],
+  expanded: boolean,
+): readonly T[] {
+  return expanded ? [...children] : children.slice(0, SIDEBAR_SUBAGENT_CHILD_COLLAPSED_COUNT);
+}
+
+/** The disclosure label: "N agents", with the running count when nonzero. */
+export function resolveSidebarSubagentDisclosureLabel(input: {
+  readonly total: number;
+  readonly running: number;
+}): string {
+  const noun = input.total === 1 ? "1 agent" : `${input.total} agents`;
+  return input.running > 0 ? `${noun} (${input.running} running)` : noun;
 }
 
 export function buildBulkTitleRegenerationContextMenuItem(input: {
