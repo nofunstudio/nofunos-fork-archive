@@ -108,6 +108,7 @@ export async function prebuildNofunArtifactsRuntime(input: {
     entryPoints: {
       compiler: NodePath.join(packageDir, "src/compiler.ts"),
       catalog: NodePath.join(packageDir, "src/catalog.ts"),
+      "tool-bundle": NodePath.join(packageDir, "src/tool-bundle.ts"),
     },
     outdir: NodePath.join(input.outDir, "src/live"),
     outExtension: { ".js": ".mjs" },
@@ -133,6 +134,7 @@ export async function prebuildNofunArtifactsRuntime(input: {
     exports: {
       "./compiler": "./src/live/compiler.mjs",
       "./catalog": "./src/live/catalog.mjs",
+      "./tool-bundle": "./src/live/tool-bundle.mjs",
     },
     dependencies,
   };
