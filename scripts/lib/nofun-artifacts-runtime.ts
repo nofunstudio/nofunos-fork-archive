@@ -19,6 +19,14 @@ import * as NodePath from "node:path";
 
 export const NOFUN_ARTIFACTS_PACKAGE = "@t3tools/nofun-artifacts";
 
+/**
+ * Mission No Fun UI runtime versions the packaged app must carry next to the components.pin one.
+ * Source of truth is the Canvas contract (nofun-canvas deps.lock `runtime`; the same value the
+ * `runtime-pin.test.ts` contract test asserts as its reference VERSION). No pin file for it exists
+ * in this repo, so this list is the single copy; the staging test imports it from here.
+ */
+export const MISSION_RUNTIME_VERSIONS = ["580e64f46a50"] as const;
+
 /** Packages the prebuilt entries leave external; everything else the compiler imports is inlined. */
 const RUNTIME_DEPENDENCIES = ["esbuild", "playwright-core"] as const;
 
@@ -96,18 +104,34 @@ export async function prebuildNofunArtifactsRuntime(input: {
     NodePath.join(input.outDir, "components.pin"),
   );
   // emitToolBundle defaults to the pinned UI runtime and the packaged server never sets
-  // runtimeRoot, so stage it with the same relative layout the source package uses.
+  // runtimeRoot, so stage it with the same relative layout the source package uses. The mission
+  // pin (emitToolBundle({ runtimeVersion: '580e64f46a50' })) must resolve the same way, so every
+  // version below has to be present before anything is copied: fail early, not mid-package.
   const runtimeSrcDir = NodePath.join(packageDir, "dist", "nofun-ui-runtime");
   const pinHead =
     NodeFs.readFileSync(NodePath.join(packageDir, "components.pin"), "utf8")
       .trim()
       .split(/\s+/)[0]
       ?.toLowerCase() ?? "";
-  const pinnedRuntimeDir = NodePath.join(runtimeSrcDir, pinHead.slice(0, 12));
-  if (!pinHead || !NodeFs.lstatSync(pinnedRuntimeDir, { throwIfNoEntry: false })?.isDirectory()) {
-    throw new Error(
-      `no built runtime at ${pinnedRuntimeDir}; run \`pnpm runtime:build\` in packages/nofun-artifacts first.`,
-    );
+  const requiredVersions = [pinHead.slice(0, 12), ...MISSION_RUNTIME_VERSIONS];
+  for (const version of requiredVersions) {
+    const runtimeDir = NodePath.join(runtimeSrcDir, version);
+    const stats = NodeFs.lstatSync(runtimeDir, { throwIfNoEntry: false });
+    const hasFiles =
+      stats?.isDirectory() === true &&
+      NodeFs.lstatSync(NodePath.join(runtimeDir, "runtime.js"), {
+        throwIfNoEntry: false,
+      })?.isFile() === true &&
+      NodeFs.lstatSync(NodePath.join(runtimeDir, "runtime.css"), {
+        throwIfNoEntry: false,
+      })?.isFile() === true;
+    if (!pinHead || !hasFiles) {
+      throw new Error(
+        `no built runtime at ${runtimeDir} for version ${version}; run \`pnpm runtime:build\` ` +
+          `in packages/nofun-artifacts with NOFUN_COMPONENTS_DIR at a clean ${version} checkout ` +
+          `(NOFUN_COMPONENTS_ALLOW_DIRTY=1 when its HEAD is not components.pin) first.`,
+      );
+    }
   }
   NodeFs.cpSync(runtimeSrcDir, NodePath.join(input.outDir, "dist", "nofun-ui-runtime"), {
     recursive: true,
