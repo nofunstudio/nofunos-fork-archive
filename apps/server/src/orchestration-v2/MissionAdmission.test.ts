@@ -3,7 +3,8 @@ import * as Result from "effect/Result";
 import * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
 
-import { Mission } from "@t3tools/contracts";
+import { Mission, type OrchestratorMcpHostCapacity } from "@t3tools/contracts";
+import { withExecutionCapacity } from "./ExecutionCapacity.ts";
 import type { ServerProviderUsageLimits } from "../../../../packages/contracts/src/providerUsageLimits.ts";
 import {
   decideMissionAdmission,
@@ -182,6 +183,29 @@ const withRouteModel = (modelId: string) => {
 };
 
 describe("MissionAdmission", () => {
+  it.each(["available", "held", "unknown"] as const)(
+    "admits a verified attempt when build-lock telemetry is %s",
+    (state) => {
+      const facts = factsFixture();
+      const capacity: OrchestratorMcpHostCapacity = {
+        hostId: "test-host",
+        bootId: "test-boot",
+        observedAtMs: NOW_MS - 1_000,
+        cpu: { utilization: 0.2, count: 8, loadAverage1m: 1, saturated: false },
+        memory: { totalBytes: 16 * 1024 ** 3, availableBytes: 8 * 1024 ** 3, pressure: "normal" },
+        disk: { path: "/tmp/project", availableBytes: 10 * 1024 ** 3, floorBytes: 5 * 1024 ** 3 },
+        buildLock: { path: "/test-home/.nofun-heavy-build.lock", state },
+        ready: true,
+        reasons: [],
+      };
+      const result = successOf(requestFixture(), {
+        ...facts,
+        host: withExecutionCapacity(facts.host, capacity),
+      });
+      assert.isTrue(result.dispatchAuthorized);
+    },
+  );
+
   it("does not dispatch unneeded work or work on an unidentified host", () => {
     assert.isTrue(
       Result.isFailure(
@@ -257,10 +281,10 @@ describe("MissionAdmission", () => {
     "gpt-6-sol",
     "gpt-4o",
   ])("denies exact banned model %s", (banned) => {
-      assert.strictEqual(
-        codeOf({ ...requestFixture(), modelId: banned }, withRouteModel(banned)),
-        "legacy_model_denied",
-      );
+    assert.strictEqual(
+      codeOf({ ...requestFixture(), modelId: banned }, withRouteModel(banned)),
+      "legacy_model_denied",
+    );
   });
 
   it("blocks attempt2 while attempt1 outcome is uncertain", () => {

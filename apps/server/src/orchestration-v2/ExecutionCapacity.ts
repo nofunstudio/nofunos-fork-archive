@@ -94,24 +94,44 @@ async function bootId(): Promise<string | null> {
   }
 }
 
-async function buildLock(path: string): Promise<OrchestratorMcpHostCapacity["buildLock"]> {
+async function probeBuildLock(
+  file: string,
+  args: string[],
+): Promise<OrchestratorMcpHostCapacity["buildLock"]["state"]> {
   try {
-    // Existence cannot establish ownership. Briefly try the same kernel lock
-    // heavy builds use, release on exit, and preserve its inode with -k.
-    if (process.platform === "darwin")
-      await command("/usr/bin/lockf", ["-t", "0", "-k", path, "/usr/bin/true"]);
-    else if (process.platform === "linux") await command("flock", ["-n", "-E", "75", path, "true"]);
-    else return { path, state: "unknown" };
-    return { path, state: "available" };
+    await command(file, args);
+    return "available";
   } catch (error) {
-    return {
-      path,
-      state:
-        typeof error === "object" && error !== null && "code" in error && error.code === 75
-          ? "held"
-          : "unknown",
-    };
+    return typeof error === "object" && error !== null && "code" in error && error.code === 75
+      ? "held"
+      : "unknown";
   }
+}
+
+async function buildLock(path: string): Promise<OrchestratorMcpHostCapacity["buildLock"]> {
+  // Existence cannot establish ownership. Briefly try the same kernel locks
+  // heavy builds use, release on exit, and preserve their inodes with -k.
+  let slots: OrchestratorMcpHostCapacity["buildLock"]["state"][];
+  if (process.platform === "darwin") {
+    // The macOS lockf helper has two slots; Linux's flock backend has one.
+    slots = await Promise.all(
+      [path, Path.join(OS.homedir(), ".nofun-heavy-build-slot2.lock")].map((slot) =>
+        probeBuildLock("/usr/bin/lockf", ["-t", "0", "-k", slot, "/usr/bin/true"]),
+      ),
+    );
+  } else if (process.platform === "linux") {
+    slots = [await probeBuildLock("flock", ["-n", "-E", "75", path, "true"])];
+  } else {
+    return { path, state: "unknown" };
+  }
+  return {
+    path,
+    state: slots.includes("available")
+      ? "available"
+      : slots.every((state) => state === "held")
+        ? "held"
+        : "unknown",
+  };
 }
 
 async function sample(
@@ -150,7 +170,8 @@ async function sample(
   if (mem.availableBytes === null) reasons.push("available_memory_unknown");
   if (disk === null || !Number.isFinite(disk)) reasons.push("disk_unknown");
   else if (disk < DISK_FLOOR_BYTES) reasons.push("disk_below_floor");
-  if (lock.state !== "available") reasons.push(`build_lock_${lock.state}`);
+  // Build slots are telemetry only: heavy builds queue themselves, while
+  // non-building agents may run whenever the host resource gates allow it.
   return {
     hostId: OS.hostname(),
     bootId: boot,
@@ -200,8 +221,7 @@ export function withExecutionCapacity(
       capacity.cpu.saturated !== null &&
       capacity.memory.pressure !== "unknown" &&
       capacity.memory.availableBytes !== null &&
-      capacity.disk.availableBytes !== null &&
-      capacity.buildLock.state !== "unknown",
+      capacity.disk.availableBytes !== null,
     pressureAcceptable: capacity.ready,
     capacity,
   };

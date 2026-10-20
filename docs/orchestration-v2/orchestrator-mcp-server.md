@@ -200,6 +200,16 @@ adapter support, disabled state, missing executable, or missing authentication.
 
 ### Capacity and context reads
 
+`orchestrator_capabilities.hostCapacity` reports local CPU, memory, disk, and
+heavy-build lock observations. Local mission admission gates on host identity
+and CPU, memory, and disk readiness. Build locks are telemetry only, including
+when their state is unknown: builds queue through the heavy-build helper, so
+occupied build slots must not prevent non-building agents from running. On
+macOS, `buildLock.state` covers both `.nofun-heavy-build.lock` and
+`.nofun-heavy-build-slot2.lock`: it is `available` if either slot is free,
+`held` only if both are held, and `unknown` otherwise. `buildLock.path` remains
+the primary lock path. Linux reports the helper's single flock slot.
+
 `orchestrator_capabilities.hostCapacity.delegatedChildren` counts nonterminal
 app-owned child tasks in this environment, split by their provider instance.
 `t3_thread_read.thread.contextUsage` follows the web meter: latest reported turn,
