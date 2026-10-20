@@ -15,6 +15,26 @@ import {
 import { expect, it } from "@effect/vitest";
 import { vi } from "vite-plus/test";
 import * as Clock from "effect/Clock";
+import * as ConfigProvider from "effect/ConfigProvider";
+import * as FetchHttpClient from "effect/http/FetchHttpClient";
+import { HttpRouter } from "effect/http";
+import * as Server from "../server.ts";
+import * as Combined from "./CombinedMissionRuntime.ts";
+import * as DeviceService from "../device/DeviceService.ts";
+import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
+import * as ProjectEnrichment from "../project/ProjectEnrichmentService.ts";
+import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import * as TerminalManager from "../terminal/Manager.ts";
+import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
+import * as WorktreeSetupTracker from "../project/WorktreeSetupTracker.ts";
+import * as GitWorkflowService from "../git/GitWorkflowService.ts";
+import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.ts";
+import * as VcsStatusBroadcaster from "../vcs/VcsStatusBroadcaster.ts";
+import * as PreviewBrowser from "../preview/PreviewBrowser.ts";
+import * as PreviewAutomationBroker from "../mcp/PreviewAutomationBroker.ts";
+import * as ThreadLaunch from "./ThreadLaunchService.ts";
+import * as MissionPeerConfiguration from "./MissionPeerConfiguration.ts";
 import * as DateTime from "effect/DateTime";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -133,9 +153,20 @@ const mission = Schema.decodeUnknownSync(Mission)({
  * exact replay without replacing the trusted facts port.
  * No provider starts and no live T3 state is opened.
  */
-it.effect.each(["provider", "muse"] as const)(
-  "J01 gate 1: production runtime admits one canonical child with %s quota and exact replay writes nothing; public binding remains pending",
-  (quotaSource) => {
+it.effect.each([
+  { quotaSource: "provider", operation: "read", scenario: "runtime" },
+  { quotaSource: "muse", operation: "read", scenario: "runtime" },
+  { quotaSource: "provider", operation: "write", scenario: "runtime" },
+  { quotaSource: "provider", operation: "read", scenario: "revoke-before-reserve" },
+  { quotaSource: "provider", operation: "read", scenario: "server-policy" },
+  { quotaSource: "provider", operation: "read", scenario: "server-missing-policy" },
+] as const)(
+  "J01 gate 1: $scenario / $operation / $quotaSource uses production authority without public binding",
+  ({ quotaSource, operation, scenario }) => {
+    const serverComposition = scenario === "server-policy" || scenario === "server-missing-policy";
+    const publish = serverComposition
+      ? vi.spyOn(MissionPolicy.MissionMcpPolicyPublisher.prototype, "publish")
+      : undefined;
     const instanceId = ProviderInstanceId.make("offline-admission");
     const selection = { instanceId, model: "gpt-6.1-sol" };
     const driver = ProviderDriverKind.make("codex");
@@ -169,8 +200,7 @@ it.effect.each(["provider", "muse"] as const)(
         }),
       ),
     );
-    const publisher = new MissionPolicy.MissionMcpPolicyPublisher();
-    publisher.publish({
+    const policyConfig = {
       company: "nofun",
       companyVerified: true,
       bindingVerified: true,
@@ -179,7 +209,9 @@ it.effect.each(["provider", "muse"] as const)(
       environmentId: authority.environmentId,
       allowedProjectIds: [ProjectId.make("project-admission")],
       bootstrapControllerThreadIds: [authority.controllerThreadId],
-    });
+    };
+    const publisher = new MissionPolicy.MissionMcpPolicyPublisher();
+    if (!serverComposition) publisher.publish(policyConfig);
     const policy = Layer.succeed(MissionAuthority.MissionMcpTrustedPolicy, publisher.policy);
     const provider: ServerProvider = {
       instanceId,
@@ -217,7 +249,39 @@ it.effect.each(["provider", "muse"] as const)(
     ).pipe(Layer.provideMerge(Layer.mock(ProjectService.ProjectService)({})));
     const runtime = Layer.mergeAll(
       runtimeServices,
-      RuntimeLayer.layerMissionAdmissionRuntime.pipe(Layer.provide(runtimeServices)),
+      serverComposition
+        ? Layer.unwrap(
+            Effect.gen(function* () {
+              const config = yield* ServerConfig.ServerConfig;
+              const fs = yield* FileSystem.FileSystem;
+              const path = yield* Path.Path;
+              if (scenario === "server-policy") {
+                const filename = path.join(config.stateDir, "nofun", "mission-mcp-policy.json");
+                yield* fs.makeDirectory(path.dirname(filename), { recursive: true });
+                yield* fs.writeFileString(filename, yield* encodeJson(policyConfig), {
+                  mode: 0o600,
+                });
+              }
+              // Build the exported route layer actually used by server.ts; no listener starts.
+              return Server.layerMissionMcpRoutes.pipe(
+                Layer.provideMerge(runtimeServices),
+                Layer.provide(PreviewAutomationBroker.layer),
+                Layer.provide(PreviewBrowser.layer.pipe(Layer.provide(FetchHttpClient.layer))),
+                Layer.provide(
+                  Layer.mergeAll(
+                    Layer.mock(DeviceService.DeviceService)({}),
+                    Layer.mock(GitWorkflowService.GitWorkflowService)({}),
+                    Layer.mock(ProjectSetupScriptRunner.ProjectSetupScriptRunner)({}),
+                    Layer.mock(VcsStatusBroadcaster.VcsStatusBroadcaster)({}),
+                    Layer.mock(ThreadLaunch.ThreadLaunchService)({}),
+                    MissionPeerConfiguration.layer,
+                  ),
+                ),
+                Layer.provide(HttpRouter.layer),
+              );
+            }),
+          )
+        : RuntimeLayer.layerMissionAdmissionRuntime.pipe(Layer.provide(runtimeServices)),
       OrchestratorMcpService.layer.pipe(Layer.provide(mcpDependencies)),
     ).pipe(
       Layer.provideMerge(
@@ -256,7 +320,19 @@ it.effect.each(["provider", "muse"] as const)(
             : Layer.empty,
           registry,
           environment,
-          policy,
+          // Peripheral dependencies captured by the full route/combined runtime.
+          // None may launch processes, prepare worktrees, or consume secrets here.
+          Layer.mock(GitVcsDriver.GitVcsDriver)({}),
+          Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({}),
+          Layer.mock(ProjectEnrichment.ProjectEnrichmentService)({}),
+          Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+          Layer.mock(SecretRequests.SecretRequests)({}),
+          Layer.mock(Environment.ServerEnvironmentIdentity)({}),
+          Layer.mock(ServerSecretStore.ServerSecretStore)({}),
+          Layer.mock(TerminalManager.TerminalManager)({}),
+          Layer.mock(WorkspacePaths.WorkspacePaths)({}),
+          Layer.mock(WorktreeSetupTracker.WorktreeSetupTracker)({}),
+          serverComposition ? Layer.empty : policy,
           Layer.mock(CheckpointStore.CheckpointStore)({}),
           Layer.mock(TextGeneration.TextGeneration)({}),
           Layer.mock(SourceControlProviders.SourceControlProviderRegistry)({
@@ -309,7 +385,7 @@ it.effect.each(["provider", "muse"] as const)(
         mission: {
           missionId: mission.id,
           taskId: "task-admission",
-          attemptKey: { attemptNumber: 1, operation: "read" as const },
+          attemptKey: { attemptNumber: 1, operation },
         },
         workspace: { strategy: "worktree" as const },
         clientRequestId: "J01-offline-denied",
@@ -405,7 +481,7 @@ it.effect.each(["provider", "muse"] as const)(
                 {
                   modelId: selection.model,
                   profile: "default",
-                  capability: "read_only",
+                  capability: operation === "write" ? "writer" : "read_only",
                   supportedModelIds: [selection.model],
                 },
               ],
@@ -449,6 +525,80 @@ it.effect.each(["provider", "muse"] as const)(
         createdBy: "agent" as const,
         creationSource: "mcp" as const,
       };
+      const log = yield* EventLog.OrchestrationEventStore;
+      const sequenceBeforeAdmission = yield* log.latestApplicationSequence;
+      const beforeAdmission = Option.getOrThrow(yield* missions.get(mission.id));
+      if (scenario === "revoke-before-reserve") {
+        const storeOf = AdmissionStore.MissionAdmissionStore.of;
+        const checkGuard = Missions.MissionTransactionGuard.check;
+        let preparedCount = 0;
+        let checkedInTransaction = false;
+        // Keep the real store and authority. Instrument only the boundary after
+        // prepare succeeds, before ThreadManagement/EventSink can reserve it.
+        yield* Effect.acquireRelease(
+          Effect.sync(() =>
+            vi.spyOn(AdmissionStore.MissionAdmissionStore, "of").mockImplementation((store) =>
+              storeOf({
+                ...store,
+                prepare: (request) =>
+                  store.prepare(request).pipe(
+                    Effect.tap(() => {
+                      preparedCount += 1;
+                      return credentials.revokeThread(authority.controllerThreadId);
+                    }),
+                  ),
+              }),
+            ),
+          ),
+          (spy) => Effect.sync(() => spy.mockRestore()),
+        );
+        yield* Effect.acquireRelease(
+          Effect.sync(() =>
+            vi.spyOn(Missions.MissionTransactionGuard, "check").mockImplementation((input) =>
+              Effect.gen(function* () {
+                if (preparedCount > 0) {
+                  checkedInTransaction = Option.isSome(
+                    yield* Effect.serviceOption(input.sql.transactionService),
+                  );
+                }
+                return yield* checkGuard(input);
+              }),
+            ),
+          ),
+          (spy) => Effect.sync(() => spy.mockRestore()),
+        );
+        const denied = yield* binding.dispatch(caller, input.mission, command).pipe(Effect.flip);
+        expect(denied._tag).toBe("OrchestratorDispatchError");
+        expect(preparedCount).toBe(1);
+        expect(checkedInTransaction).toBe(true);
+        expect(yield* log.latestApplicationSequence).toBe(sequenceBeforeAdmission);
+        expect(Option.getOrThrow(yield* missions.get(mission.id))).toEqual(beforeAdmission);
+        expect(
+          (yield* threads.getThreadProjection(authority.controllerThreadId)).subagents,
+        ).toEqual([]);
+        return;
+      }
+      if (serverComposition) {
+        const published = yield* MissionAuthority.MissionMcpTrustedPolicy;
+        const combined = yield* Combined.CombinedMissionRuntime;
+        if (scenario === "server-missing-policy") {
+          expect(publish).not.toHaveBeenCalled();
+          expect((yield* combined.status).authority).toBe("authority_unavailable");
+          const denied = yield* binding.dispatch(caller, input.mission, command).pipe(Effect.flip);
+          expect(denied._tag).toBe("OrchestratorDispatchError");
+          expect(yield* log.latestApplicationSequence).toBe(sequenceBeforeAdmission);
+          expect(Option.getOrThrow(yield* missions.get(mission.id))).toEqual(beforeAdmission);
+          expect(
+            (yield* threads.getThreadProjection(authority.controllerThreadId)).subagents,
+          ).toEqual([]);
+          return;
+        }
+        expect(publish).toHaveBeenCalledTimes(1);
+        expect((publish!.mock.contexts[0] as MissionPolicy.MissionMcpPolicyPublisher).policy).toBe(
+          published,
+        );
+        expect((yield* combined.status).authority).toBe("available");
+      }
       const [first, concurrent] = yield* Effect.all(
         [
           binding.dispatch(caller, input.mission, command),
@@ -468,7 +618,12 @@ it.effect.each(["provider", "muse"] as const)(
       );
       const child = yield* threads.getThreadProjection(children[0]!.childThreadId!);
       expect(child.messages[0]?.text).toBe(input.task);
-      const log = yield* EventLog.OrchestrationEventStore;
+      if (operation === "write") {
+        expect(admitted.execution?.writerClaims).toHaveLength(1);
+        expect(admitted.execution?.writerClaims?.[0]?.scope).toBe(
+          "/workspace/project/src/admission",
+        );
+      }
       const committedSequence = yield* log.latestApplicationSequence;
       const admissionEvents = yield* log.readMissionEvents(mission.id);
       const replay = yield* binding.dispatch(caller, input.mission, command);
@@ -490,6 +645,18 @@ it.effect.each(["provider", "muse"] as const)(
       expect(changed._tag).toBe("OrchestratorDispatchError");
       expect(yield* log.latestApplicationSequence).toBe(committedSequence);
       expect(Option.getOrThrow(yield* missions.get(mission.id))).toEqual(admitted);
+      if (scenario === "server-policy") {
+        // Revoking the one published cell must invalidate both consumers.
+        (publish!.mock.contexts[0] as MissionPolicy.MissionMcpPolicyPublisher).revoke();
+        expect((yield* (yield* Combined.CombinedMissionRuntime).status).authority).toBe(
+          "authority_unavailable",
+        );
+        expect(
+          (yield* binding.dispatch(caller, input.mission, command).pipe(Effect.flip))._tag,
+        ).toBe("OrchestratorDispatchError");
+        expect(yield* log.latestApplicationSequence).toBe(committedSequence);
+        expect(Option.getOrThrow(yield* missions.get(mission.id))).toEqual(admitted);
+      }
       // A revoked credential may not recover an already admitted child.
       yield* credentials.revokeThread(authority.controllerThreadId);
       expect((yield* binding.dispatch(caller, input.mission, command).pipe(Effect.flip))._tag).toBe(
@@ -499,6 +666,8 @@ it.effect.each(["provider", "muse"] as const)(
       Effect.provide(
         runtime.pipe(Layer.provide(Layer.succeed(Missions.MissionAuthority, authority))),
       ),
+      Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} }))),
+      Effect.ensuring(Effect.sync(() => publish?.mockRestore())),
     );
   },
 );

@@ -251,6 +251,9 @@ company, billing or route grant. No tool accepts or edits this file. Removing
 or invalidating it denies the next preparation. Account, host and repository
 observations expire after five minutes; passive quota expires after thirty
 minutes. Missing, stale, foreign or unknown facts never default to healthy.
+These freshness limits apply to fresh admissions. Exact replay skips observation
+timestamp checks and returns its recorded receipt, but still requires valid
+configuration, a matching provider entry, a live credential and current policy.
 This is host qualification, not executable SHA attestation (J01 gate 3).
 
 The binding accepts an existing canonical checkout only. Explicit workspace

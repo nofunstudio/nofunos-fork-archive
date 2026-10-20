@@ -678,6 +678,22 @@ const layerCommandReadiness = HttpRouter.middleware(
   { global: true },
 );
 
+/** Shared production MCP route composition, also built by the admission integration test. */
+export const layerMissionMcpRoutes = McpHttpServer.layer.pipe(
+  Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
+  // Mission tools read the same registry, environment, projections, and SQL
+  // as the rest of the server; their NoFun policy comes from the owner's
+  // local policy file (see MissionMcpRuntime), never from a default.
+  Layer.provideMerge(RuntimeLayer.layerMissionAdmissionRuntime),
+  Layer.provideMerge(
+    MissionMcpRuntime.layerCombined.pipe(
+      Layer.provide(MissionPeerConfiguredClient.layer.pipe(Layer.provide(ProcessRunner.layer))),
+    ),
+  ),
+  // Both the runtime and the optional policy-only toolkit fallback read projections.
+  Layer.provide(ProjectionStoreV2.layer),
+);
+
 const layerMakeRoutes = Layer.mergeAll(
   Layer.mergeAll(
     HttpApiBuilder.layer(EnvironmentHttpApi).pipe(
@@ -707,20 +723,7 @@ const layerMakeRoutes = Layer.mergeAll(
   // delegation targets through the same live adapter facade the V2
   // orchestrator uses, so MCP capability reporting can never drift from
   // what dispatch can actually serve.
-  McpHttpServer.layer.pipe(
-    Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
-    // Mission tools read the same registry, environment, projections, and SQL
-    // as the rest of the server; their NoFun policy comes from the owner's
-    // local policy file (see MissionMcpRuntime), never from a default.
-    Layer.provide(RuntimeLayer.layerMissionAdmissionRuntime),
-    Layer.provide(
-      MissionMcpRuntime.layerCombined.pipe(
-        Layer.provide(MissionPeerConfiguredClient.layer.pipe(Layer.provide(ProcessRunner.layer))),
-      ),
-    ),
-    // Both the runtime and the optional policy-only toolkit fallback read projections.
-    Layer.provide(ProjectionStoreV2.layer),
-  ),
+  layerMissionMcpRoutes,
 ).pipe(
   // Both transports consume the same service instance, so caches single-flight across clients
   // and mutations observed on WebSocket invalidate patches subsequently read over HTTP.

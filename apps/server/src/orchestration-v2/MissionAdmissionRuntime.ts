@@ -126,7 +126,8 @@ const make = Effect.gen(function* () {
           Layer.succeed(Configuration.MissionAdmissionConfiguration, configuration),
         );
         const missions = yield* Missions.MissionService.pipe(
-          Effect.provide(Missions.layer.pipe(Layer.provide(base))),
+          // A request must never reuse a globally memoized, guard-less service.
+          Effect.provide(Missions.layer.pipe(Layer.provide(base)), { local: true }),
         );
         const mission = Option.getOrUndefined(
           yield* missions.get(MissionId.make(selected.missionId)).pipe(Effect.mapError(rejected)),
@@ -168,6 +169,7 @@ const make = Effect.gen(function* () {
               Layer.provide(Facts.layer.pipe(Layer.provide(base))),
               Layer.provide(base),
             ),
+            { local: true },
           ),
         );
         const result = yield* threads
