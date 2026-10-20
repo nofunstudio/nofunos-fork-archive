@@ -1,4 +1,3 @@
-import { formatContextWindowTokens } from "../../lib/contextWindow";
 import type { ModelSelection, ProviderDriverKind, ProviderInstanceId } from "@t3tools/contracts";
 import {
   CLAUDE_RESUME_COMPACTION_NEVER_ANSWER,
@@ -10,7 +9,8 @@ import {
 } from "../../providerInstances";
 import { getTriggerDisplayModelName, type ModelEsque } from "./providerIconUtils";
 
-const CLAUDE_RESUME_COMPACTION_MINUTES = 70;
+// Used when the provider did not report its cache TTL: Claude's 1h cache plus slack.
+const CLAUDE_RESUME_COMPACTION_FALLBACK_MS = 70 * 60_000;
 const CLAUDE_RESUME_COMPACTION_TOKENS = 100_000;
 
 export function providerSupportsManualCompaction(
@@ -65,6 +65,7 @@ export function shouldOfferResumeCompaction(input: {
   readonly provider: string | null | undefined;
   readonly usedTokens: number | null | undefined;
   readonly updatedAt: string | null | undefined;
+  readonly promptCacheTtlMs?: number | undefined;
   readonly now: string;
 }): boolean {
   if (
@@ -79,7 +80,7 @@ export function shouldOfferResumeCompaction(input: {
   return (
     Number.isFinite(updatedAt) &&
     Number.isFinite(now) &&
-    now - updatedAt >= CLAUDE_RESUME_COMPACTION_MINUTES * 60_000
+    now - updatedAt >= (input.promptCacheTtlMs ?? CLAUDE_RESUME_COMPACTION_FALLBACK_MS)
   );
 }
 
@@ -98,15 +99,30 @@ export function resolveContextWindowModelDisplayName(
   return selectedModel ? getTriggerDisplayModelName(selectedModel) : selection.model;
 }
 
-export function formatContextWindowCompactionMessage(autoCompactThreshold?: number | null): string {
-  if (
-    typeof autoCompactThreshold === "number" &&
-    Number.isFinite(autoCompactThreshold) &&
-    autoCompactThreshold > 0
-  ) {
-    return `Auto target: ${formatContextWindowTokens(autoCompactThreshold)}`;
+export function formatContextWindowCompactionMessage(
+  modelDisplayName: string | null | undefined,
+  autoCompactThreshold?: number | null,
+): string {
+  if (typeof autoCompactThreshold === "number" && autoCompactThreshold > 0) {
+    return `Compacts automatically at ${autoCompactThreshold.toLocaleString("en-US")} tokens.`;
   }
-  return "Native policy not reported";
+  return modelDisplayName
+    ? `Context for ${modelDisplayName} compacts automatically when needed.`
+    : "Context compacts automatically when needed.";
+}
+
+export function shouldReserveContextWindowMeter(input: {
+  readonly meterEnabled: boolean;
+  readonly detailLoading: boolean;
+  readonly threadStarted: boolean;
+  readonly providerReportsContextWindow: boolean | null;
+}): boolean {
+  return (
+    input.meterEnabled &&
+    input.detailLoading &&
+    input.threadStarted &&
+    input.providerReportsContextWindow !== false
+  );
 }
 
 export function formatContextWindowCost(cost: {

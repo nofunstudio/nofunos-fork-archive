@@ -5,14 +5,10 @@ export interface CommandPaletteLinkedThreads {
   readonly threads: PullRequestLinkedThreadsResult["threads"];
 }
 
-// Tiny event bus allowing components to programmatically open the command palette
-// without owning its React state.
 const COMMAND_PALETTE_OPEN_EVENT = "t3code:open-command-palette";
 
 export interface CommandPaletteOpenDetail {
   readonly open?: "add-project" | "new-thread-in";
-  /** With `open: "add-project"`, skip the environment step and browse this one. */
-  readonly environmentId?: EnvironmentId;
   readonly query?: string;
   readonly linkedThreads?: CommandPaletteLinkedThreads;
 }
@@ -33,7 +29,6 @@ export function onOpenCommandPalette(
   return () => window.removeEventListener(COMMAND_PALETTE_OPEN_EVENT, handler);
 }
 
-/** Read at event time so consumers do not subscribe to transient dialog state. */
 export function isCommandPaletteOpen(): boolean {
   return (
     typeof document !== "undefined" && document.querySelector("[data-command-palette]") !== null
