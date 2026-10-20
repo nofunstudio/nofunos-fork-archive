@@ -63,6 +63,37 @@ const NEXT_SHIMS: Record<string, string> = {
   "client-only": "empty.ts",
 };
 
+/**
+ * Probe order for extensionless relative imports (`./model` beside
+ * `model.mjs`). esbuild's default resolver tries tsx/ts/jsx/js/json and never
+ * `.mjs`; `.mjs` trails the list so every specifier that resolves today keeps
+ * its existing target and only previously-unresolvable `.mjs` files start
+ * resolving.
+ */
+const EXTENSIONLESS_PROBES = [".tsx", ".ts", ".jsx", ".js", ".json", ".mjs"] as const;
+
+/**
+ * Resolve an extensionless relative specifier (`./x`, `../x`) to a sibling
+ * file the builder supports. Returns undefined when the specifier already has
+ * an extension or no probed file exists, so the default resolver keeps
+ * handling everything else byte-for-byte as before.
+ */
+function probeExtensionlessRelative(args: esbuild.OnResolveArgs): string | undefined {
+  const base = args.path.split("/").pop() ?? "";
+  if (base.includes(".")) return undefined;
+  const fromDir =
+    args.importer && NodePath.isAbsolute(args.importer)
+      ? NodePath.dirname(args.importer)
+      : args.resolveDir;
+  for (const ext of EXTENSIONLESS_PROBES) {
+    const candidate = NodePath.resolve(fromDir, `${args.path}${ext}`);
+    if (NodeFs.lstatSync(candidate, { throwIfNoEntry: false })?.isFile() === true) {
+      return candidate;
+    }
+  }
+  return undefined;
+}
+
 const ASSET_LOADERS: Record<string, esbuild.Loader> = {
   ".png": "dataurl",
   ".jpg": "dataurl",
@@ -237,6 +268,14 @@ export async function bundle(
         ) {
           const resolved = await resolveIn(path, dir, args.kind);
           return resolved.errors.length > 0 ? { errors: resolved.errors } : { path: resolved.path };
+        }
+        // Extensionless relative imports reach esbuild's default resolver,
+        // which never tries `.mjs` (chat-list's `./experiment-mrch-model`).
+        // Probe the builder's supported extensions first; anything already
+        // resolving keeps its target because `.mjs` trails esbuild's order.
+        if (!isBare(path)) {
+          const probed = probeExtensionlessRelative(args);
+          if (probed) return { path: probed };
         }
         return undefined;
       });
