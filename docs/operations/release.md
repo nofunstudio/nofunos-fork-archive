@@ -611,7 +611,29 @@ Checklist:
 ## 6) No Fun installs on Nos and the M1
 
 Nos and the M1 must run the same packaged build. The owner-machine update
-process (build once with `scripts/build-desktop-artifact.ts`, ad-hoc sign,
-install on the M1 first and then Nos, verify byte-identical) and the read-only
+process (build once with `scripts/build-desktop-artifact.ts`, install on the M1
+first and then Nos, verify byte-identical) and the read-only
 side-by-side check `t3-versions.sh` live in `nofunstudio/nofun-skills`:
 `skills/workflow/t3-code/references/update-both-macs.md`.
+
+### Stable signing for local builds
+
+Unsigned (non-`--signed`) macOS builds run on a Mac sign the app with a stable
+Apple Development identity instead of ad hoc. An ad-hoc signature changes every
+build, so macOS treats each install as a new app and drops its Screen
+Recording, Accessibility and other privacy (TCC) grants.
+
+- The identity is the first `Apple Development:` entry in
+  `security find-identity -v -p codesigning`, or the one named by
+  `T3CODE_MAC_SIGN_IDENTITY` (SHA-1 or full name). No secret is involved; the
+  key stays in the login keychain.
+- The hardened runtime is off and nothing is notarized (local builds carry no
+  entitlements).
+- After packaging, the build runs `codesign -dv` on the `.app` and fails if it
+  is `Signature=adhoc` or has no `TeamIdentifier`. Set
+  `T3CODE_MAC_SIGN_TEAM_ID` to also require a specific team.
+- With no matching identity the build fails. `T3CODE_MAC_ALLOW_ADHOC=true`
+  accepts an ad-hoc build on purpose. CI builds without release secrets keep
+  the ad-hoc behavior unless `T3CODE_MAC_SIGN_IDENTITY` is set.
+- Do not re-sign the result with `codesign --sign -`; that throws the stable
+  identity away.
