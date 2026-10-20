@@ -135,9 +135,10 @@ const handlers = {
       const config = yield* ServerConfig.ServerConfig;
       const path = yield* Path.Path;
       // Before anything is stored in the thread: a bundle request that cannot be pinned fails whole.
-      const bundle = input.bundle
+      const bundleOptions = input.bundle ?? (input.output === "canvas-bundle" ? {} : undefined);
+      const bundle = bundleOptions
         ? yield* writeBundle(
-            { ...input, bundle: input.bundle },
+            { ...input, bundle: bundleOptions },
             path.join(config.stateDir, "artifact-bundles", thread.threadId),
           )
         : undefined;
@@ -165,10 +166,12 @@ const handlers = {
               bundle: {
                 directory: bundle.dir,
                 manifestPath: bundle.manifestPath,
+                stampPath: path.join(bundle.dir, "stamp.json"),
                 sha256: bundle.manifest.sha256,
                 createdAt: bundle.manifest.createdAt,
                 runtime: bundle.runtime,
               },
+              place_artifact: { bundle_path: bundle.dir },
             }
           : {}),
         message:
@@ -202,7 +205,7 @@ const layerPreviewHandlers = NofunArtifactPreviewToolkit.toLayer({
   nofun_artifact_preview: handlers.nofun_artifact_preview,
 });
 
-const layerRenderHandlers = NofunArtifactRenderToolkit.toLayer({
+export const layerRenderHandlers = NofunArtifactRenderToolkit.toLayer({
   nofun_artifact_render: handlers.nofun_artifact_render,
 });
 
