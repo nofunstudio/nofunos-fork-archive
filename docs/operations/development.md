@@ -143,6 +143,25 @@ DMGs default to the host architecture. Use `--arch` to choose another target and
 to retain packaging files for inspection. Run `vp run dist:desktop:artifact --help` for other
 options.
 
+### Packaged No Fun artifact mission runtimes
+
+`dist:desktop:artifact` stages the pinned mission No Fun UI runtime
+(`580e64f46a50`) into the packaged server bundle and refuses to build it from a
+local `runtime:build`: only the canonical bytes both pinned hosts admit are
+staged. The default caller passes no mission root, so packaging currently
+requires `NOFUN_MISSION_RUNTIME_ROOT` pointing at the canonical publisher
+directory that holds byte-for-byte `<version>/` folders:
+
+```sh
+NOFUN_MISSION_RUNTIME_ROOT=<nofun-canvas checkout>/Sources/CanvasMac/Runtime/nofun-ui-runtime \
+  vp run dist:desktop:artifact
+```
+
+That root is the parent of `580e64f46a50/` in a nofun-canvas checkout. The
+`NOFUN_COMPONENTS_DIR` fallback only applies to a components checkout that
+separately publishes `canvas-web/nofun-ui-runtime/<version>/`; the pinned
+checkout does not have that layout.
+
 ### Linux AppImage prerequisites
 
 Build on Linux because the browser-secret helper links against the host's libsecret. Install

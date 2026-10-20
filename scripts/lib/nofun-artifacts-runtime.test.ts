@@ -9,6 +9,7 @@ import {
   MISSION_RUNTIMES,
   MISSION_RUNTIME_VERSIONS,
   missionRuntimeDigest,
+  missionRuntimeSourceDir,
   prebuildNofunArtifactsRuntime,
 } from "./nofun-artifacts-runtime.ts";
 
@@ -523,6 +524,86 @@ describe("prebuildNofunArtifactsRuntime mission digest gate", () => {
       assert.include((error as Error).message, canonical);
       assert.match((error as Error).message, /refusing to stage non-canonical bytes/);
       assert.isFalse(NodeFS.existsSync(NodePath.join(scratch, "staged", "package.json")));
+    } finally {
+      NodeFS.rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("missionRuntimeSourceDir canonical source hint", () => {
+  const version = "580e64f46a50";
+
+  it("names the canonical mission source when no root is configured", () => {
+    const savedMission = process.env.NOFUN_MISSION_RUNTIME_ROOT;
+    const savedComponents = process.env.NOFUN_COMPONENTS_DIR;
+    try {
+      delete process.env.NOFUN_MISSION_RUNTIME_ROOT;
+      delete process.env.NOFUN_COMPONENTS_DIR;
+      let error: unknown;
+      try {
+        missionRuntimeSourceDir(version, "/repo");
+      } catch (caught) {
+        error = caught;
+      }
+      assert.instanceOf(error, Error);
+      assert.include((error as Error).message, "NOFUN_MISSION_RUNTIME_ROOT");
+      assert.include((error as Error).message, "Sources/CanvasMac/Runtime/nofun-ui-runtime");
+    } finally {
+      if (savedMission === undefined) delete process.env.NOFUN_MISSION_RUNTIME_ROOT;
+      else process.env.NOFUN_MISSION_RUNTIME_ROOT = savedMission;
+      if (savedComponents === undefined) delete process.env.NOFUN_COMPONENTS_DIR;
+      else process.env.NOFUN_COMPONENTS_DIR = savedComponents;
+    }
+  });
+
+  it("resolves an override root holding the <version>/ layout", () => {
+    const saved = process.env.NOFUN_MISSION_RUNTIME_ROOT;
+    const scratch = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "nofun-runtime-resolver-"));
+    try {
+      writeMissionFixture(scratch, version, "window.NoFunUI={};\n", "body{}\n");
+      process.env.NOFUN_MISSION_RUNTIME_ROOT = scratch;
+      assert.equal(missionRuntimeSourceDir(version, "/repo"), NodePath.join(scratch, version));
+    } finally {
+      if (saved === undefined) delete process.env.NOFUN_MISSION_RUNTIME_ROOT;
+      else process.env.NOFUN_MISSION_RUNTIME_ROOT = saved;
+      NodeFS.rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+
+  it("reports the canonical source when the mission root is absent during staging", async () => {
+    const packageDir = NodePath.join(repoRoot, "packages/nofun-artifacts");
+    const scratch = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "nofun-runtime-test-"));
+    try {
+      const fakePkg = NodePath.join(scratch, "repo", "packages", "nofun-artifacts");
+      NodeFS.mkdirSync(fakePkg, { recursive: true });
+      for (const name of ["package.json", "components.pin"]) {
+        NodeFS.copyFileSync(NodePath.join(packageDir, name), NodePath.join(fakePkg, name));
+      }
+      for (const name of ["src", "fonts", "generated"]) {
+        NodeFS.mkdirSync(NodePath.join(fakePkg, name), { recursive: true });
+      }
+      const pin = NodeFS.readFileSync(NodePath.join(packageDir, "components.pin"), "utf8")
+        .trim()
+        .split(/\s+/)[0]!
+        .toLowerCase()
+        .slice(0, 12);
+      const present = NodePath.join(fakePkg, "dist", "nofun-ui-runtime", pin);
+      NodeFS.mkdirSync(present, { recursive: true });
+      NodeFS.writeFileSync(NodePath.join(present, "runtime.js"), "window.NoFunUI={};\n");
+      NodeFS.writeFileSync(NodePath.join(present, "runtime.css"), "body{}\n");
+      let error: unknown;
+      try {
+        await prebuildNofunArtifactsRuntime({
+          repoRoot: NodePath.join(scratch, "repo"),
+          outDir: NodePath.join(scratch, "staged"),
+          missionRuntimeRoot: NodePath.join(scratch, "empty-mission"),
+        });
+      } catch (caught) {
+        error = caught;
+      }
+      assert.instanceOf(error, Error);
+      assert.include((error as Error).message, "NOFUN_MISSION_RUNTIME_ROOT");
+      assert.include((error as Error).message, "Sources/CanvasMac/Runtime/nofun-ui-runtime");
     } finally {
       NodeFS.rmSync(scratch, { recursive: true, force: true });
     }

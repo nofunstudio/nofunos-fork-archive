@@ -66,11 +66,12 @@ export function missionRuntimeDigest(runtimeDir: string): string {
 /**
  * Where the canonical mission runtime `<version>/` directory comes from. A local
  * `runtime:build` is NOT a source: rebuilds of the same components commit drift from the
- * canonical bytes both pinned hosts admit. Either set NOFUN_MISSION_RUNTIME_ROOT to a directory
- * containing `<version>/` folders copied byte-for-byte from the canonical publisher
- * (nofun-components `canvas-web/nofun-ui-runtime/<version>/`; equivalently nofun-canvas
- * `Sources/CanvasMac/Runtime/nofun-ui-runtime/<version>/`), or set NOFUN_COMPONENTS_DIR at a
- * checkout that publishes `canvas-web/nofun-ui-runtime/<version>/`.
+ * canonical bytes both pinned hosts admit. Set NOFUN_MISSION_RUNTIME_ROOT to the canonical
+ * publisher directory holding byte-for-byte `<version>/` folders:
+ * `<nofun-canvas checkout>/Sources/CanvasMac/Runtime/nofun-ui-runtime` (the parent of
+ * `580e64f46a50/`). The NOFUN_COMPONENTS_DIR fallback only applies to a components
+ * checkout that separately publishes `canvas-web/nofun-ui-runtime/<version>/`; the
+ * pinned checkout does not have that layout.
  */
 export function missionRuntimeSourceDir(version: string, repoRoot: string): string {
   const override = process.env.NOFUN_MISSION_RUNTIME_ROOT?.trim();
@@ -80,10 +81,13 @@ export function missionRuntimeSourceDir(version: string, repoRoot: string): stri
     return NodePath.join(componentsDir, "canvas-web", "nofun-ui-runtime", version);
   }
   throw new Error(
-    `no canonical source for mission runtime ${version}: set NOFUN_MISSION_RUNTIME_ROOT to a ` +
-      `directory holding byte-for-byte canonical <version>/ folders, or set NOFUN_COMPONENTS_DIR ` +
-      `at a checkout publishing canvas-web/nofun-ui-runtime/${version}/ (repo root ${repoRoot} ` +
-      `has no canonical copy; never stage a local runtime:build output for a mission version).`,
+    `no canonical source for mission runtime ${version}: set NOFUN_MISSION_RUNTIME_ROOT=` +
+      `<nofun-canvas checkout>/Sources/CanvasMac/Runtime/nofun-ui-runtime (the parent of ` +
+      `${version}/ holding byte-for-byte canonical <version>/ folders). The ` +
+      `NOFUN_COMPONENTS_DIR fallback applies only to a checkout that separately publishes ` +
+      `canvas-web/nofun-ui-runtime/${version}/, which the pinned checkout does not have ` +
+      `(repo root ${repoRoot} has no canonical copy; never stage a local runtime:build ` +
+      `output for a mission version).`,
   );
 }
 
@@ -210,9 +214,12 @@ export async function prebuildNofunArtifactsRuntime(input: {
       actual = missionRuntimeDigest(sourceDir);
     } catch (error) {
       throw new Error(
-        `no canonical mission runtime at ${sourceDir} for version ${pin.version}; copy it ` +
-          `byte-for-byte from canvas-web/nofun-ui-runtime/${pin.version}/ (or set ` +
-          `NOFUN_MISSION_RUNTIME_ROOT at such a root) instead of rebuilding it: ` +
+        `no canonical mission runtime at ${sourceDir} for version ${pin.version}; set ` +
+          `NOFUN_MISSION_RUNTIME_ROOT=<nofun-canvas checkout>/Sources/CanvasMac/Runtime/nofun-ui-runtime ` +
+          `(the parent of ${pin.version}/ holding byte-for-byte canonical <version>/ folders) ` +
+          `instead of rebuilding it. The canvas-web/nofun-ui-runtime/${pin.version}/ layout ` +
+          `applies only to a separately published runtime layout, which the pinned checkout ` +
+          `does not have: ` +
           `${error instanceof Error ? error.message : String(error)}`,
       );
     }
