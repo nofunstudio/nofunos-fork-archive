@@ -2032,6 +2032,31 @@ describe("OrchestratorMcpService provider resolution", () => {
       }),
     );
 
+    it.effect("reports dispatchAuthorized true on dispatch and false on replay", () =>
+      Effect.gen(function* () {
+        const harness = delegation({});
+        const first = yield* harness.run(
+          delegate(scope, {
+            task: taskText,
+            mode: "async",
+            clientRequestId: "rc-dispatch-once",
+          }),
+        );
+        assert.isTrue(first.dispatchAuthorized);
+        const second = yield* harness.run(
+          delegate(scope, {
+            task: taskText,
+            mode: "async",
+            clientRequestId: "rc-dispatch-once",
+          }),
+        );
+        // The replay reuses the admitted task without a second dispatch.
+        assert.isFalse(second.dispatchAuthorized);
+        assert.equal(second.taskId, first.taskId);
+        assert.equal(harness.dispatched.length, 1);
+      }),
+    );
+
     it.effect("reads a path reference once from the project workspace and admits its bytes", () =>
       Effect.gen(function* () {
         const workspaceRoot = makeWorkspace({ "docs/rates.md": RATES });
