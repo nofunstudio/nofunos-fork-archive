@@ -71,14 +71,32 @@ export function threadActivityMs(
   return Number.isFinite(latest) ? latest : parseMs(thread.createdAt);
 }
 
-/** The most recently active thread; ties keep the earlier entry. */
+export interface PickLatestThreadSubagents<
+  T extends Pick<EnvironmentThreadShell, "latestUserMessageAt" | "latestRun" | "createdAt">,
+> {
+  readonly getKey: (thread: T) => string;
+  readonly childrenByParentKey: ReadonlyMap<string, ReadonlyArray<T>>;
+}
+
+/**
+ * The most recently active thread; ties keep the earlier entry. A parent's
+ * most recent subagent child activity counts as the parent's own, so work
+ * that runs entirely in delegated children still surfaces the parent first.
+ */
 export function pickLatestThread<
   T extends Pick<EnvironmentThreadShell, "latestUserMessageAt" | "latestRun" | "createdAt">,
->(threads: ReadonlyArray<T>): T | null {
+>(threads: ReadonlyArray<T>, subagents?: PickLatestThreadSubagents<T>): T | null {
   let best: T | null = null;
   let bestMs = Number.NEGATIVE_INFINITY;
   for (const thread of threads) {
-    const ms = threadActivityMs(thread);
+    let ms = threadActivityMs(thread);
+    const children =
+      subagents === undefined
+        ? undefined
+        : subagents.childrenByParentKey.get(subagents.getKey(thread));
+    if (children !== undefined) {
+      for (const child of children) ms = Math.max(ms, threadActivityMs(child));
+    }
     if (best === null || ms > bestMs) {
       best = thread;
       bestMs = ms;

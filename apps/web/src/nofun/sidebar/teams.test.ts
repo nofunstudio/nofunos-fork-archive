@@ -96,6 +96,25 @@ describe("latest thread", () => {
     expect(pickLatestThread([old, fresh])?.id).toBe("fresh");
     expect(pickLatestThread([])).toBeNull();
   });
+
+  it("counts a parent's most recent child activity as its own", () => {
+    const parent = thread("parent", { user: "2026-10-01T10:00:00.000Z" });
+    const other = thread("other", { user: "2026-10-01T11:00:00.000Z" });
+    const child = thread("child", { user: "2026-10-01T12:00:00.000Z" });
+    const childrenByParentKey = new Map([["parent", [child]]]);
+    const subagents = { getKey: (candidate: typeof parent) => candidate.id, childrenByParentKey };
+    expect(pickLatestThread([parent, other])?.id).toBe("other");
+    expect(pickLatestThread([parent, other], subagents)?.id).toBe("parent");
+  });
+
+  it("ignores children grouped under another parent", () => {
+    const parent = thread("parent", { user: "2026-10-01T10:00:00.000Z" });
+    const other = thread("other", { user: "2026-10-01T11:00:00.000Z" });
+    const elsewhere = thread("elsewhere", { user: "2026-10-01T12:00:00.000Z" });
+    const childrenByParentKey = new Map([["someone-else", [elsewhere]]]);
+    const subagents = { getKey: (candidate: typeof parent) => candidate.id, childrenByParentKey };
+    expect(pickLatestThread([parent, other], subagents)?.id).toBe("other");
+  });
 });
 
 describe("threadWorkCounts", () => {

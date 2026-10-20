@@ -114,6 +114,32 @@ it("keeps a subagent child awake when its parent thread is snoozed", () => {
   });
 });
 
+it("starts a subagent child unpinned and unsettled even when its parent is pinned and settled", () => {
+  const parentThread: OrchestrationV2AppThread = {
+    ...makeParentThread(),
+    pinnedAt: childCreatedAt,
+    pinOrderKey: "a0" as never,
+    settledOverride: "settled",
+  };
+  const parentNodeId = NodeId.make("node:subagent-pinned-parent");
+  const childThread = makeSubagentChildThread({
+    parentThread,
+    childThreadId,
+    parentNodeId,
+    activeProviderThreadId: null,
+    providerInstanceId: childProviderInstanceId,
+    modelSelection: childModelSelection,
+    title: "Unpinned child",
+    now: childCreatedAt,
+    createdBy: "agent",
+    creationSource: "provider",
+  });
+
+  assert.isNull(childThread.pinnedAt);
+  assert.isNull(childThread.pinOrderKey);
+  assert.isNull(childThread.settledOverride);
+});
+
 it("attributes native subagent prompts to their parent thread", () => {
   for (const role of ["user", "assistant"] as const) {
     const artifacts = makeSubagentConversationArtifacts({

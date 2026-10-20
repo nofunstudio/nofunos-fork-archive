@@ -84,6 +84,7 @@ import {
   XIcon,
 } from "lucide-react";
 import {
+  Fragment,
   memo,
   useCallback,
   useEffect,
@@ -196,10 +197,17 @@ import {
   resolveSidebarDropVerb,
   resolveSidebarThreadSection,
   resolveSidebarRowAccessibility,
+  groupSidebarSubagentChildren,
+  isSidebarSubagentChildRunning,
+  resolveSidebarSubagentDisclosureLabel,
+  sidebarSubagentParentKey,
+  sliceSidebarSubagentChildren,
+  sortSidebarSubagentChildren,
   type SidebarDropVerb,
   resolveSidebarThreadStatus,
   resolveThreadLastVisitedAt,
   searchSidebarThreads,
+  SIDEBAR_SUBAGENT_CHILD_COLLAPSED_COUNT,
   shouldCreateNewThreadInCurrentProject,
   shouldNavigateAfterThreadPark,
   shouldRecedeSidebarThread,
@@ -788,6 +796,80 @@ function SidebarSectionHeader(props: {
         {props.label}
       </CollapsibleSectionHeader>
     </SortableSidebarMarker>
+  );
+}
+
+// Delegated subagent children live under their parent row, never as rows of
+// their own: a collapsible "N agents (k running)" disclosure listing running
+// children first, then most recent, capped with a show-all. Child rows only
+// navigate; they carry no pin, settle, or snooze affordances.
+function SidebarSubagentDisclosure(props: {
+  childThreads: readonly EnvironmentThreadShell[];
+  activeThreadKey: string | null;
+  onChildClick: (event: ReactMouseEvent, threadRef: ScopedThreadRef) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [showAll, setShowAll] = useState(false);
+  const ordered = useMemo(
+    () => sortSidebarSubagentChildren(props.childThreads),
+    [props.childThreads],
+  );
+  const runningCount = ordered.filter(isSidebarSubagentChildRunning).length;
+  if (ordered.length === 0) return null;
+  const visible = sliceSidebarSubagentChildren(ordered, showAll);
+  return (
+    <div className="flex flex-col pl-4">
+      <CollapsibleSectionHeader
+        expanded={expanded}
+        onClick={() => setExpanded((value) => !value)}
+        tone="muted"
+        data-testid="sidebar-subagent-disclosure"
+      >
+        {resolveSidebarSubagentDisclosureLabel({ total: ordered.length, running: runningCount })}
+      </CollapsibleSectionHeader>
+      {expanded ? (
+        <ul className="flex flex-col">
+          {visible.map((child) => {
+            const childKey = scopedThreadKey(scopeThreadRef(child.environmentId, child.id));
+            const isActive = props.activeThreadKey === childKey;
+            const running = isSidebarSubagentChildRunning(child);
+            return (
+              <li key={childKey}>
+                <button
+                  type="button"
+                  onClick={(event) =>
+                    props.onChildClick(event, scopeThreadRef(child.environmentId, child.id))
+                  }
+                  aria-label={running ? `${child.title}, running` : undefined}
+                  className={cn(
+                    "flex h-8 w-full cursor-pointer items-center gap-2 rounded-md px-2 text-left text-sm",
+                    isActive
+                      ? "bg-sidebar-row-active font-medium text-sidebar-foreground"
+                      : "text-sidebar-muted-foreground/80 hover:bg-sidebar-row-hover hover:text-sidebar-foreground",
+                  )}
+                >
+                  <span className="min-w-0 flex-1 truncate">{child.title}</span>
+                  <span className="shrink-0 text-xs text-sidebar-muted-foreground/60">
+                    {threadTimeLabel(child)}
+                  </span>
+                </button>
+              </li>
+            );
+          })}
+          {ordered.length > SIDEBAR_SUBAGENT_CHILD_COLLAPSED_COUNT ? (
+            <li>
+              <button
+                type="button"
+                onClick={() => setShowAll((value) => !value)}
+                className="flex h-8 w-full cursor-pointer items-center gap-2 rounded-md px-2 text-left text-xs text-sidebar-muted-foreground/60 hover:bg-sidebar-row-hover hover:text-sidebar-foreground"
+              >
+                {showAll ? "Show less" : `Show all ${ordered.length} agents`}
+              </button>
+            </li>
+          ) : null}
+        </ul>
+      ) : null}
+    </div>
   );
 }
 
@@ -2424,6 +2506,12 @@ function SidebarPane(props: SidebarPaneProps) {
     () => threadsOfTeam(allThreads, props.teamId, teamByEnvironment),
     [allThreads, props.teamId, teamByEnvironment],
   );
+  // Delegated subagent children group under their parent row; they never
+  // enter the pinned/active/working/snoozed/settled sections themselves.
+  const subagentChildrenByParentKey = useMemo(
+    () => groupSidebarSubagentChildren(threads),
+    [threads],
+  );
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const clearSelection = useThreadSelectionStore((s) => s.clearSelection);
   const setSelectionAnchor = useThreadSelectionStore((s) => s.setAnchor);
@@ -2843,7 +2931,12 @@ function SidebarPane(props: SidebarPaneProps) {
   useEffect(() => {
     if (latestThreadKey !== null || activeThreads.length === 0) return;
     const choose = () => {
-      const latest = pickLatestThread(activeThreads);
+      // A parent's most recent subagent child activity counts as its own, so
+      // work running entirely in delegated children still surfaces the parent.
+      const latest = pickLatestThread(activeThreads, {
+        getKey: (thread) => scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
+        childrenByParentKey: subagentChildrenByParentKey,
+      });
       if (latest !== null) {
         setLatestThreadKey(scopedThreadKey(scopeThreadRef(latest.environmentId, latest.id)));
       }
@@ -2855,7 +2948,7 @@ function SidebarPane(props: SidebarPaneProps) {
     // A slow or offline environment must not hold the pick back forever.
     const timer = window.setTimeout(choose, 4000);
     return () => window.clearTimeout(timer);
-  }, [activeThreads, allProjectSnapshotsReady, latestThreadKey]);
+  }, [activeThreads, allProjectSnapshotsReady, latestThreadKey, subagentChildrenByParentKey]);
   const latestThread = useMemo(
     () =>
       latestThreadKey === null
@@ -5178,7 +5271,11 @@ function SidebarPane(props: SidebarPaneProps) {
                         const isCard =
                           section === "active" || section === "pinned" || section === "working";
                         const rowVariant = isCard ? "card" : "slim";
-                        return (
+                        const subagentChildren =
+                          subagentChildrenByParentKey.get(
+                            sidebarSubagentParentKey(thread.environmentId, thread.id),
+                          ) ?? null;
+                        const row = (
                           <SidebarThreadRow
                             // Fade between card and compact rows while the outer
                             // sortable wrapper keeps its identity during a drag.
@@ -5280,6 +5377,17 @@ function SidebarPane(props: SidebarPaneProps) {
                             }
                             onChangeRequestSnapshot={setThreadChangeRequestSnapshot}
                           />
+                        );
+                        if (subagentChildren === null) return row;
+                        return (
+                          <Fragment key={`${threadKey}:subagents`}>
+                            {row}
+                            <SidebarSubagentDisclosure
+                              childThreads={subagentChildren}
+                              activeThreadKey={routeThreadKey}
+                              onChildClick={handleThreadClick}
+                            />
+                          </Fragment>
                         );
                       };
                       const renderThreadRow = (
