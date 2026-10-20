@@ -63,6 +63,118 @@ const NEXT_SHIMS: Record<string, string> = {
   "client-only": "empty.ts",
 };
 
+/**
+ * Extra extensions probed only when nothing esbuild itself would try exists.
+ * esbuild never tries `.mjs`/`.cjs` for extensionless relative imports
+ * (chat-list's `./experiment-mrch-model`), so only these previously
+ * unresolvable targets are probed — everything that resolves today keeps
+ * its existing target byte-for-byte.
+ */
+const FALLBACK_PROBES = [".mjs", ".cjs"] as const;
+
+/**
+ * esbuild's default `resolveExtensions` when the build sets none (mirrors
+ * esbuild's documented default list). Read `build.initialOptions` first so a
+ * custom list stays authoritative.
+ */
+const ESBUILD_DEFAULT_RESOLVE_EXTENSIONS = [".tsx", ".ts", ".jsx", ".js", ".css", ".json"] as const;
+
+/**
+ * Whether a specifier may gain a new fallback target. Only extensionless
+ * relative file imports (`./x`, `../x`) qualify: absolute paths, directory
+ * imports with a trailing slash, specifiers that already carry an extension,
+ * and non-file namespaces keep esbuild's default behavior untouched.
+ */
+function fallbackEligible(args: esbuild.OnResolveArgs): boolean {
+  if (args.namespace !== "file") return false;
+  const spec = args.path;
+  if (!spec.startsWith("./") && !spec.startsWith("../")) return false;
+  if (spec.endsWith("/")) return false;
+  const base = spec.split("/").pop() ?? "";
+  if (base.includes(".")) return false;
+  return true;
+}
+
+/**
+ * Regular-file check that follows symlinks. Missing paths, broken links,
+ * and unreadable entries are not files.
+ */
+function isFile(candidate: string): boolean {
+  try {
+    return NodeFs.statSync(candidate).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Marker protecting the fallback path's own `build.resolve` probes from
+ * re-entering the fallback: marker-tagged resolves skip straight to native
+ * handling, so the probes observe exactly what esbuild would do.
+ */
+const FALLBACK_RESOLVE_MARKER = "nofunExtensionlessFallback";
+
+/**
+ * Probe the extra extensions under esbuild's authoritative resolve dir.
+ * Returns the fallback specifier and absolute path when a fallback file
+ * exists, and undefined otherwise.
+ */
+function probeFallbackExtensions(
+  resolveDir: string,
+  spec: string,
+): { spec: string; path: string } | undefined {
+  for (const ext of FALLBACK_PROBES) {
+    const candidate = NodePath.resolve(resolveDir, `${spec}${ext}`);
+    if (isFile(candidate)) return { spec: `${spec}${ext}`, path: candidate };
+  }
+  return undefined;
+}
+
+/**
+ * Namespace for extensionless-fallback proxy modules. esbuild itself
+ * resolves the explicit `./foo.mjs`/`./foo.cjs` specifier inside the
+ * proxy, so browser-field mappings keyed at the fallback path (`false`,
+ * redirects), `sideEffects`, and resolve conditions all apply natively.
+ * Returning the fallback file's own path in the `file` namespace instead
+ * (as two earlier revisions did) drops esbuild's internal disabled-module
+ * state and bundles `browser:false` targets anyway.
+ */
+const FALLBACK_PROXY_NAMESPACE = "nofun-ext-fallback";
+
+/**
+ * Data carried from the fallback `onResolve` to the proxy `onLoad`.
+ * `spec` stays in explicit form (`./foo.mjs`) so the inner import gets
+ * full native semantics; `resolveDir` is the original importer's dir.
+ */
+interface FallbackProxyData {
+  readonly spec: string;
+  readonly resolveDir: string;
+  readonly with?: Record<string, string> | undefined;
+}
+
+/**
+ * Tiny re-export shim whose inner import esbuild resolves natively.
+ * `.mjs` stays ESM: `export *` carries every named export, and the
+ * namespace default carries the default export — including the empty
+ * disabled module, whose namespace is `{}` with an `undefined` default
+ * (JSON-identical to `{}`; see the regression test). A static
+ * `export { default } from` is deliberately NOT used: it hard-errors the
+ * whole build for targets without a default (disabled modules,
+ * named-only modules), even for importers that never touch `default`.
+ * `.cjs` keeps CJS semantics via `module.exports = require(...)`,
+ * preserving interop. Import attributes of the original import, when any,
+ * ride along on both inner statements.
+ */
+function fallbackProxySource(spec: string, ext: ".mjs" | ".cjs", withClause: string): string {
+  if (ext === ".cjs") return `module.exports = require(${JSON.stringify(spec)});\n`;
+  const quoted = JSON.stringify(spec);
+  return (
+    `export * from ${quoted}${withClause};\n` +
+    `import * as __nofun_ext_m from ${quoted}${withClause};\n` +
+    `export default __nofun_ext_m.default;\n`
+  );
+}
+
 const ASSET_LOADERS: Record<string, esbuild.Loader> = {
   ".png": "dataurl",
   ".jpg": "dataurl",
@@ -155,6 +267,36 @@ export async function bundle(
     setup(build) {
       const resolveIn = (path: string, resolveDir: string, kind: esbuild.ImportKind) =>
         build.resolve(path, { resolveDir, kind });
+      const resolveExtensions = build.initialOptions.resolveExtensions ?? [
+        ...ESBUILD_DEFAULT_RESOLVE_EXTENSIONS,
+      ];
+      // Per-build cache of existence probes: one bundle resolves each
+      // specifier once, but the index probes below overlap across imports.
+      const statCache = new Map<string, boolean>();
+      const cachedIsFile = (candidate: string): boolean => {
+        const hit = statCache.get(candidate);
+        if (hit !== undefined) return hit;
+        const found = isFile(candidate);
+        statCache.set(candidate, found);
+        return found;
+      };
+      // Whether esbuild's own resolution would find a target for an
+      // extensionless relative specifier: the exact file, `<p><ext>` and
+      // `<p>/index<ext>` for each effective resolve extension, or a
+      // `<p>/package.json` (whose main/browser fields esbuild reads).
+      // Anything esbuild would resolve keeps native handling untouched.
+      const nativeTargetExists = (resolveDir: string, spec: string): boolean => {
+        const base = NodePath.resolve(resolveDir, spec);
+        if (cachedIsFile(base)) return true;
+        for (const ext of resolveExtensions) {
+          if (cachedIsFile(`${base}${ext}`)) return true;
+        }
+        for (const ext of resolveExtensions) {
+          if (cachedIsFile(NodePath.join(base, `index${ext}`))) return true;
+        }
+        if (cachedIsFile(NodePath.join(base, "package.json"))) return true;
+        return false;
+      };
 
       build.onResolve({ filter: /.*/ }, async (args) => {
         const { path } = args;
@@ -238,6 +380,61 @@ export async function bundle(
           const resolved = await resolveIn(path, dir, args.kind);
           return resolved.errors.length > 0 ? { errors: resolved.errors } : { path: resolved.path };
         }
+        // Extensionless relative imports reach esbuild's default resolver,
+        // which never tries `.mjs`/`.cjs` (chat-list's
+        // `./experiment-mrch-model`). Do a cheap synchronous existence
+        // check of exactly what esbuild itself would try; when any of
+        // those targets exists, return undefined so esbuild resolves
+        // normally — preserving browser-field mappings, plugin
+        // namespaces, resolution order, and every other native behavior.
+        // Only when none exists, and a sibling `.mjs`/`.cjs` file does,
+        // select that previously-unresolvable target as below. No
+        // `build.resolve` round trip on this fast path, so ordinary
+        // imports pay only cached stat calls.
+        if (!isBare(path) && fallbackEligible(args)) {
+          if (args.pluginData?.[FALLBACK_RESOLVE_MARKER]) return undefined;
+          if (nativeTargetExists(args.resolveDir, path)) return undefined;
+          const probed = probeFallbackExtensions(args.resolveDir, path);
+          if (!probed) return undefined;
+          // A package.json `browser` mapping can resolve the original
+          // extensionless specifier even though no file exists at the
+          // original path (`{"./foo": false}` disables the module,
+          // `{"./foo": "./bar.ts"}` redirects it). The stat check above
+          // cannot see mappings, so ask esbuild about the original
+          // specifier first; when it resolves, step aside (undefined) so
+          // native handling applies the mapping untouched. Only when even
+          // esbuild cannot resolve the original is the fallback selected —
+          // via the proxy module below, so mappings keyed at the fallback
+          // path itself still apply natively. This probe runs solely on
+          // this rare path (no native target AND a fallback file exists).
+          const markerData = { [FALLBACK_RESOLVE_MARKER]: true };
+          const native = await build.resolve(path, {
+            resolveDir: args.resolveDir,
+            kind: args.kind,
+            importer: args.importer,
+            pluginData: markerData,
+            with: args.with,
+          });
+          if (native.errors.length === 0) return undefined;
+          // No native target and no mapping for the original specifier:
+          // hand esbuild a proxy module in a private namespace. The proxy
+          // re-exports the explicit `probed.spec`, which esbuild then
+          // resolves natively — browser:false/redirect mappings keyed at
+          // the fallback path, sideEffects, and conditions included. The
+          // visible fields of a `build.resolve` must NOT be returned here:
+          // they carry no disabled-module state. This path makes exactly
+          // one probe call; the fast path above makes none.
+          const proxyData: FallbackProxyData = {
+            spec: probed.spec,
+            resolveDir: args.resolveDir,
+            with: args.with,
+          };
+          return {
+            path: probed.path,
+            namespace: FALLBACK_PROXY_NAMESPACE,
+            pluginData: proxyData,
+          };
+        }
         return undefined;
       });
 
@@ -246,6 +443,19 @@ export async function bundle(
         loader: "tsx",
         resolveDir: dir,
       }));
+      build.onLoad({ filter: /.*/, namespace: FALLBACK_PROXY_NAMESPACE }, (args) => {
+        const data = args.pluginData as FallbackProxyData;
+        const ext = data.spec.endsWith(".cjs") ? ".cjs" : ".mjs";
+        const withClause =
+          data.with != null && Object.keys(data.with).length > 0
+            ? ` with ${JSON.stringify(data.with)}`
+            : "";
+        return {
+          contents: fallbackProxySource(data.spec, ext, withClause),
+          loader: "js",
+          resolveDir: data.resolveDir,
+        };
+      });
       build.onLoad({ filter: /.*/, namespace: "nf-font" }, (args) => ({
         contents: fontModule(args.path),
         loader: "js",
