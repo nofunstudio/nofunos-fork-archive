@@ -162,6 +162,10 @@ That root is the parent of `580e64f46a50/` in a nofun-canvas checkout. The
 separately publishes `canvas-web/nofun-ui-runtime/<version>/`; the pinned
 checkout does not have that layout.
 
+`components.pin` now resolves to the same `580e64f46a50` version, so staging
+dedupes it to a single copy and still validates the staged bytes against the
+mission digest before anything is copied.
+
 ### Linux AppImage prerequisites
 
 Build on Linux because the browser-secret helper links against the host's libsecret. Install

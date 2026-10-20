@@ -191,15 +191,17 @@ describe("prebuildNofunArtifactsRuntime staged tool-bundle runtime", () => {
     }
   });
 
-  it("stages the mission pin runtime(s) beside the components.pin one", async () => {
+  it("stages the mission pin runtime(s) beside the components.pin one, deduped when equal", async () => {
     assert.isNotEmpty(MISSION_RUNTIME_VERSIONS);
     const packageDir = NodePath.join(repoRoot, "packages/nofun-artifacts");
     const pin = NodeFS.readFileSync(NodePath.join(packageDir, "components.pin"), "utf8")
       .trim()
       .split(/\s+/)[0]!
       .toLowerCase();
-    const versions = [pin.slice(0, 12), ...MISSION_RUNTIME_VERSIONS];
-    assert.isTrue(new Set(versions).size === versions.length, "mission pins must add versions");
+    // The components runtime can BE a mission runtime: the staging loop dedupes that case to
+    // one copy and still validates its bytes against the mission digest. Mission pins only
+    // need to cover versions beyond the pin.
+    const versions = [...new Set([pin.slice(0, 12), ...MISSION_RUNTIME_VERSIONS])];
     const scratch = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "nofun-runtime-test-"));
     const savedEnv = {
       NOFUN_UI_RUNTIME_ROOT: process.env.NOFUN_UI_RUNTIME_ROOT,
@@ -231,8 +233,11 @@ describe("prebuildNofunArtifactsRuntime staged tool-bundle runtime", () => {
       );
       NodeFS.writeFileSync(NodePath.join(pinFixtureDir, "brands", "t3.css"), "body{}\n");
       // A dist copy of a mission version must NOT satisfy staging: only the canonical
-      // source counts, so the stale local rebuild planted here stays unused.
+      // source counts, so the stale local rebuild planted here stays unused. Versions equal
+      // to the pin are skipped: the pin fixture above IS their staging source, and the
+      // staging loop validates those bytes against the mission digest instead.
       for (const version of MISSION_RUNTIME_VERSIONS) {
+        if (version === pin.slice(0, 12)) continue;
         const stale = NodePath.join(fakePkg, "dist", "nofun-ui-runtime", version);
         NodeFS.mkdirSync(NodePath.join(stale, "brands"), { recursive: true });
         NodeFS.writeFileSync(NodePath.join(stale, "runtime.js"), "window.NoFunUI={stale:true};\n");
@@ -440,8 +445,10 @@ describe("prebuildNofunArtifactsRuntime mission digest gate", () => {
       NodeFS.writeFileSync(NodePath.join(pinDir, "runtime.js"), "window.NoFunUI={};\n");
       NodeFS.writeFileSync(NodePath.join(pinDir, "runtime.css"), "body{}\n");
       // Small fixture whose digest is computed in the test, like the canonical check.
+      // Kept distinct from the pin so this exercises the copy path, not the dedupe one.
       const missionRoot = NodePath.join(scratch, "mission");
-      const missionVersion = "580e64f46a50";
+      const missionVersion = "abcdef123456";
+      assert.notEqual(missionVersion, pin);
       const sourceDir = writeMissionFixture(
         missionRoot,
         missionVersion,
