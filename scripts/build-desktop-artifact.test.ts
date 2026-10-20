@@ -22,6 +22,10 @@ import {
   createStageWorkspaceConfig,
   createStagePatchedDependencies,
   createBuildConfig,
+  macSignatureProblem,
+  parseCodesignDetails,
+  parseCodesigningIdentities,
+  selectMacLocalSigningIdentity,
   DESKTOP_ELECTRON_LANGUAGES,
   DESKTOP_FILE_EXCLUSIONS,
   DESKTOP_EXTRA_RESOURCES,
@@ -1997,6 +2001,109 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       ]);
     }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
   );
+
+  it.effect(
+    "signs unsigned macOS builds with the pinned local identity, hardened runtime off",
+    () =>
+      Effect.gen(function* () {
+        const config = yield* createBuildConfig(
+          "mac",
+          "zip",
+          "1.2.3",
+          false,
+          false,
+          undefined,
+          undefined,
+          false,
+          "arm64",
+          "0123456789ABCDEF0123456789ABCDEF01234567",
+        );
+
+        const mac = config.mac as Record<string, unknown>;
+        assert.equal(mac.identity, "0123456789ABCDEF0123456789ABCDEF01234567");
+        assert.equal(mac.hardenedRuntime, false);
+        assert.equal(mac.notarize, false);
+        assert.match(String(mac.sign), /[\\/]scripts[\\/]sign-macos\.ts$/);
+        assert.notProperty(mac, "entitlements");
+      }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
+  );
+
+  it.effect("leaves unsigned macOS builds without an identity when none was resolved", () =>
+    Effect.gen(function* () {
+      const config = yield* createBuildConfig(
+        "mac",
+        "zip",
+        "1.2.3",
+        false,
+        false,
+        undefined,
+        undefined,
+      );
+      const mac = config.mac as Record<string, unknown>;
+      assert.notProperty(mac, "identity");
+      assert.notProperty(mac, "sign");
+    }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
+  );
+
+  it("parses codesigning identities and prefers Apple Development", () => {
+    const output = [
+      '  1) AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA "Developer ID Application: Example (ABCDE12345)"',
+      '  2) 0123456789ABCDEF0123456789ABCDEF01234567 "Apple Development: Example Person (M79XTCTNH9)"',
+      "     2 valid identities found",
+    ].join("\n");
+    const identities = parseCodesigningIdentities(output);
+    assert.equal(identities.length, 2);
+    assert.deepStrictEqual(selectMacLocalSigningIdentity(identities, undefined), {
+      hash: "0123456789ABCDEF0123456789ABCDEF01234567",
+      name: "Apple Development: Example Person (M79XTCTNH9)",
+    });
+    assert.equal(
+      selectMacLocalSigningIdentity(identities, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")?.hash,
+      "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    );
+    assert.equal(
+      selectMacLocalSigningIdentity(identities, "Developer ID Application: Example (ABCDE12345)")
+        ?.hash,
+      "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    );
+    assert.isUndefined(selectMacLocalSigningIdentity(identities, "missing"));
+    assert.isUndefined(selectMacLocalSigningIdentity([], undefined));
+  });
+
+  it("rejects ad-hoc and team-less codesign results", () => {
+    const adhoc = parseCodesignDetails(
+      [
+        "Executable=/tmp/No Fun T3.app/Contents/MacOS/No Fun T3",
+        "Identifier=Electron",
+        "CodeDirectory v=20400 size=1 flags=0x20002(adhoc,linker-signed) hashes=1+0 location=embedded",
+        "Signature=adhoc",
+        "TeamIdentifier=not set",
+      ].join("\n"),
+    );
+    assert.equal(macSignatureProblem(adhoc, undefined), "Signature=adhoc");
+
+    const stable = parseCodesignDetails(
+      [
+        "Identifier=io.nofun.t3",
+        "CodeDirectory v=20500 size=1 flags=0x0(none) hashes=1+7 location=embedded",
+        "Authority=Apple Development: Example Person (M79XTCTNH9)",
+        "TeamIdentifier=2879453295",
+      ].join("\n"),
+    );
+    assert.isUndefined(macSignatureProblem(stable, undefined));
+    assert.isUndefined(macSignatureProblem(stable, "2879453295"));
+    assert.equal(
+      macSignatureProblem(stable, "ABCDE12345"),
+      "TeamIdentifier=2879453295, expected ABCDE12345",
+    );
+    assert.equal(
+      macSignatureProblem(
+        parseCodesignDetails("Identifier=io.nofun.t3\nTeamIdentifier=not set"),
+        undefined,
+      ),
+      "no TeamIdentifier",
+    );
+  });
 
   it.effect("uses the nightly DMG background for nightly macOS builds", () =>
     Effect.gen(function* () {

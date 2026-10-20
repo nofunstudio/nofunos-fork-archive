@@ -61,6 +61,74 @@ const LINUX_ICON_SIZES = [16, 22, 24, 32, 48, 64, 128, 256, 512] as const;
 const DESKTOP_APP_ID = "io.nofun.t3";
 const APPLE_TEAM_ID_PATTERN = /^[A-Z0-9]{10}$/u;
 
+// Local (non-release) macOS builds sign with a stable Apple Development
+// identity. Ad-hoc signatures change on every build, so macOS treats each
+// install as a new app and drops its Screen Recording/Accessibility grants.
+export const MAC_LOCAL_SIGN_IDENTITY_ENV = "T3CODE_MAC_SIGN_IDENTITY";
+export const MAC_LOCAL_SIGN_TEAM_ID_ENV = "T3CODE_MAC_SIGN_TEAM_ID";
+export const MAC_ALLOW_ADHOC_ENV = "T3CODE_MAC_ALLOW_ADHOC";
+
+export interface CodesigningIdentity {
+  readonly hash: string;
+  readonly name: string;
+}
+
+/** Parse `security find-identity -v -p codesigning` output. */
+export function parseCodesigningIdentities(output: string): CodesigningIdentity[] {
+  const identities: CodesigningIdentity[] = [];
+  for (const line of output.split(/\r?\n/u)) {
+    const match = /^\s*\d+\)\s+([0-9A-F]{40})\s+"(.+)"\s*$/u.exec(line);
+    if (match) identities.push({ hash: match[1]!, name: match[2]! });
+  }
+  return identities;
+}
+
+/**
+ * Pick the identity a local macOS build signs with: the one named by
+ * T3CODE_MAC_SIGN_IDENTITY (SHA-1 or name), else the first Apple Development
+ * identity in the keychain.
+ */
+export function selectMacLocalSigningIdentity(
+  identities: ReadonlyArray<CodesigningIdentity>,
+  requested: string | undefined,
+): CodesigningIdentity | undefined {
+  const wanted = requested?.trim();
+  if (wanted) {
+    return identities.find(
+      (identity) => identity.hash === wanted.toUpperCase() || identity.name === wanted,
+    );
+  }
+  return identities.find((identity) => identity.name.startsWith("Apple Development:"));
+}
+
+/** Parse `codesign -dv` output (it writes to stderr) into the fields the gate checks. */
+export function parseCodesignDetails(output: string): {
+  readonly adhoc: boolean;
+  readonly teamIdentifier: string | undefined;
+  readonly authority: string | undefined;
+} {
+  const team = /^TeamIdentifier=(.+)$/mu.exec(output)?.[1]?.trim();
+  return {
+    adhoc: /^Signature=adhoc$/mu.test(output) || /flags=0x[0-9a-f]*\(adhoc/u.test(output),
+    teamIdentifier: team && team !== "not set" ? team : undefined,
+    authority: /^Authority=(.+)$/mu.exec(output)?.[1]?.trim(),
+  };
+}
+
+/** Why a codesign result is unacceptable for a local install, or undefined when it is fine. */
+export function macSignatureProblem(
+  details: ReturnType<typeof parseCodesignDetails>,
+  expectedTeamId: string | undefined,
+): string | undefined {
+  if (details.adhoc) return "Signature=adhoc";
+  if (!details.teamIdentifier) return "no TeamIdentifier";
+  const expected = expectedTeamId?.trim();
+  if (expected && details.teamIdentifier !== expected) {
+    return `TeamIdentifier=${details.teamIdentifier}, expected ${expected}`;
+  }
+  return undefined;
+}
+
 const BuildPlatform = Schema.Literals(["mac", "linux", "win"]);
 const BuildArch = Schema.Literals(["arm64", "x64", "universal"]);
 
@@ -677,6 +745,32 @@ export class DesktopBuildNoArtifactsProducedError extends Schema.TaggedError<Des
 ) {
   override get message(): string {
     return `Build completed but no files were produced in ${this.distPath}`;
+  }
+}
+
+export class MacLocalSigningIdentityNotFoundError extends Schema.TaggedError<MacLocalSigningIdentityNotFoundError>()(
+  "MacLocalSigningIdentityNotFoundError",
+  {
+    requestedIdentity: Schema.optional(Schema.String),
+  },
+) {
+  override get message(): string {
+    const wanted = this.requestedIdentity
+      ? `the ${MAC_LOCAL_SIGN_IDENTITY_ENV} identity`
+      : 'an "Apple Development:" identity';
+    return `No valid codesigning identity matched ${wanted} (\`security find-identity -v -p codesigning\`). Local macOS builds must be signed with a stable identity so installs keep their TCC permissions. Set ${MAC_LOCAL_SIGN_IDENTITY_ENV} to the identity's SHA-1 or name, or set ${MAC_ALLOW_ADHOC_ENV}=true to accept an ad-hoc build.`;
+  }
+}
+
+export class MacAdhocSignatureError extends Schema.TaggedError<MacAdhocSignatureError>()(
+  "MacAdhocSignatureError",
+  {
+    appPath: Schema.String,
+    reason: Schema.String,
+  },
+) {
+  override get message(): string {
+    return `Packaged macOS app is not signed with a stable identity (${this.reason}): ${this.appPath}. Ad-hoc builds reset macOS privacy (TCC) grants on every install.`;
   }
 }
 
@@ -2686,6 +2780,8 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   // source file was never written fails the electron-builder step.
   wslRuntimeBundled = false,
   arch?: typeof BuildArch.Type,
+  // Unsigned (non-release) macOS builds: SHA-1 of the local identity to sign with.
+  macLocalSigningIdentityHash?: string,
 ) {
   const buildConfig: Record<string, unknown> = {
     appId: DESKTOP_APP_ID,
@@ -2750,6 +2846,18 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
         },
       ],
       ...(signed ? { sign: path.join(repoRoot, "scripts/sign-macos.ts") } : {}),
+      ...(!signed && macLocalSigningIdentityHash
+        ? {
+            // electron-builder matches the qualifier against
+            // `security find-identity` lines, so the SHA-1 selects exactly one
+            // identity. No entitlements exist for local builds, so the
+            // hardened runtime stays off; there is nothing to notarize.
+            identity: macLocalSigningIdentityHash,
+            hardenedRuntime: false,
+            notarize: false,
+            sign: path.join(repoRoot, "scripts/sign-macos.ts"),
+          }
+        : {}),
       ...(macPasskeySigning
         ? {
             entitlements: macPasskeySigning.entitlementsPath,
@@ -3731,6 +3839,10 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     options.platform === "win"
       ? path.join(stageAppDir, WINDOWS_SERVER_RESOURCE_SOURCE_DIR, WINDOWS_SERVER_ASAR_RESOURCE)
       : undefined;
+  const macLocalSigningIdentity =
+    options.platform === "mac" && !options.signed
+      ? yield* resolveMacLocalSigningIdentity()
+      : undefined;
   const stagePackageJson: StagePackageJson = {
     name: "t3code",
     version: appVersion,
@@ -3758,6 +3870,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
         : undefined,
       bundlesWslRuntime({ platform: options.platform, runtimeArchivePath: options.wslRuntime }),
       options.arch,
+      macLocalSigningIdentity?.hash,
     ),
     dependencies: stageDependencies,
     devDependencies: {
@@ -3914,6 +4027,10 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     });
   }
 
+  if (macLocalSigningIdentity) {
+    yield* assertMacStableSignature(stageDistDir);
+  }
+
   // Prove the packaged bundle is self-contained by loading it the way the WSL
   // backend does, rather than by reasoning about the emitted source.
   //
@@ -3965,6 +4082,84 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   yield* Effect.log("[desktop-artifact] Done. Artifacts:").pipe(
     Effect.annotateLogs({ artifacts: copiedArtifacts }),
   );
+});
+
+const MacLocalSigningEnvConfig = Config.all({
+  identity: Config.String(MAC_LOCAL_SIGN_IDENTITY_ENV).pipe(Config.option),
+  teamId: Config.String(MAC_LOCAL_SIGN_TEAM_ID_ENV).pipe(Config.option),
+  allowAdhoc: Config.Boolean(MAC_ALLOW_ADHOC_ENV).pipe(Config.withDefault(false)),
+  ci: Config.String("CI").pipe(Config.option),
+});
+
+/**
+ * Resolve the stable identity an unsigned (non-release) macOS build signs
+ * with. Local builds fail without one; CI builds without release secrets keep
+ * the upstream ad-hoc behavior unless T3CODE_MAC_SIGN_IDENTITY is set.
+ */
+const resolveMacLocalSigningIdentity = Effect.fn("resolveMacLocalSigningIdentity")(function* () {
+  const env = yield* MacLocalSigningEnvConfig;
+  const requested = Option.getOrUndefined(env.identity)?.trim() || undefined;
+  const isCi = Option.isSome(env.ci) && env.ci.value !== "" && env.ci.value !== "false";
+  if (env.allowAdhoc || (isCi && !requested)) {
+    yield* Effect.logWarning(
+      "[desktop-artifact] macOS build is not pinned to a stable signing identity (ad-hoc).",
+    );
+    return undefined;
+  }
+  const result = yield* spawnAndCollectOutput(
+    ChildProcess.make("/usr/bin/security", ["find-identity", "-v", "-p", "codesigning"]),
+  ).pipe(Effect.orElseSucceed(() => ({ stdout: "", stderr: "", exitCode: 1 })));
+  const identity = selectMacLocalSigningIdentity(
+    parseCodesigningIdentities(result.stdout),
+    requested,
+  );
+  if (!identity) {
+    return yield* new MacLocalSigningIdentityNotFoundError(
+      requested ? { requestedIdentity: requested } : {},
+    );
+  }
+  yield* Effect.log(`[desktop-artifact] Signing macOS app with "${identity.name}".`);
+  return identity;
+});
+
+/** Fail the build when the packaged .app is ad-hoc or has no TeamIdentifier. */
+const assertMacStableSignature = Effect.fn("assertMacStableSignature")(function* (
+  stageDistDir: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const env = yield* MacLocalSigningEnvConfig;
+  const appPaths: string[] = [];
+  for (const entry of yield* fs.readDirectory(stageDistDir)) {
+    if (!entry.startsWith("mac")) continue;
+    const dir = path.join(stageDistDir, entry);
+    const children = yield* fs.readDirectory(dir).pipe(Effect.orElseSucceed(() => []));
+    for (const child of children) {
+      if (child.endsWith(".app")) appPaths.push(path.join(dir, child));
+    }
+  }
+  if (appPaths.length === 0) {
+    return yield* new MacAdhocSignatureError({
+      appPath: stageDistDir,
+      reason: "no packaged .app found to verify",
+    });
+  }
+  for (const appPath of appPaths) {
+    const result = yield* spawnAndCollectOutput(
+      ChildProcess.make("/usr/bin/codesign", ["-dv", "--verbose=2", appPath]),
+    );
+    const details = parseCodesignDetails(`${result.stdout}\n${result.stderr}`);
+    const problem =
+      result.exitCode === 0
+        ? macSignatureProblem(details, Option.getOrUndefined(env.teamId))
+        : `codesign -dv exited ${result.exitCode}`;
+    if (problem) {
+      return yield* new MacAdhocSignatureError({ appPath, reason: problem });
+    }
+    yield* Effect.log(
+      `[desktop-artifact] Verified macOS signature: TeamIdentifier=${details.teamIdentifier} (${appPath}).`,
+    );
+  }
 });
 
 const buildDesktopArtifactCli = Command.make("build-desktop-artifact", {
