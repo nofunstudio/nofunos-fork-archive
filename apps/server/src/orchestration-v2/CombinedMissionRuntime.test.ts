@@ -45,6 +45,7 @@ import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.
 import type { ProviderInstance } from "../provider/ProviderDriver.ts";
 import * as ProviderRegistryMock from "../provider/testUtils/providerRegistryMock.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import { ServerActivation } from "../serverActivation.ts";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
 import * as TextGeneration from "../textGeneration/TextGeneration.ts";
@@ -457,6 +458,9 @@ fs.writeFileSync(path.join(process.env.NOFUN_REPLAY_OUT_DIR, "result.json"), JSO
         });
       const platform = Layer.mergeAll(
         NodeServices.layer,
+        // These tests drive requests directly. Park background reconciliation so
+        // the seeded pending reservation cannot advance the revision mid-replay.
+        Layer.succeed(ServerActivation, Effect.never),
         Layer.mock(SourceControlProviderRegistry.SourceControlProviderRegistry)({
           resolveLink: () => Effect.die("unused"),
         }),
@@ -1031,16 +1035,27 @@ it.effect("CATCHES keeps the combined runtime without NoFun authority", () =>
   ),
 );
 
-it.live(
-  "revocation after the first real replay process prevents all remaining process starts and recording",
-  () =>
+it.live.each(["credential revocation", "canonical revision drift"] as const)(
+  "%s after the first real replay process prevents all remaining process starts and recording",
+  (invalidation) =>
     withHarness({ config: "configured" }, (h) =>
       Effect.gen(function* () {
         yield* h.seed();
         const runtime = yield* Combined.CombinedMissionRuntime;
         const registry = yield* McpSessionRegistry.McpSessionRegistry;
         const scope = yield* h.issue(retro);
-        h.replayProbe.afterExit = registry.revokeThread(retro);
+        const sql = yield* SqlClient.SqlClient;
+        h.replayProbe.afterExit =
+          invalidation === "credential revocation"
+            ? registry.revokeThread(retro)
+            : Effect.gen(function* () {
+                const rows = yield* sql<{
+                  snapshot_json: string;
+                }>`SELECT snapshot_json FROM projection_missions WHERE mission_id = 'mission'`;
+                const current = decodeMissionJson(rows[0]!.snapshot_json);
+                const changed = decodeMission({ ...current, revision: current.revision + 1 });
+                yield* sql`UPDATE projection_missions SET revision = ${changed.revision}, snapshot_json = ${encodeMission(changed)} WHERE mission_id = 'mission'`;
+              }).pipe(Effect.orDie);
         const result = yield* runtime
           .withRequest(scope, { missionId: "mission", role: "retro" }, (r) =>
             r.replayAndRecord({
@@ -1052,12 +1067,21 @@ it.live(
           )
           .pipe(Effect.result);
         assert.equal(result._tag, "Failure");
+        if (result._tag === "Failure") {
+          assert.equal(result.failure._tag, "MissionRetroReplayRunError");
+          if (result.failure._tag === "MissionRetroReplayRunError")
+            assert.equal(result.failure.category, "executor_failed");
+        }
         assert.equal(h.replayProbe.spawned, 1);
-        const sql = yield* SqlClient.SqlClient;
         const rows = yield* sql<{
           revision: number;
-        }>`SELECT revision FROM projection_missions WHERE mission_id = 'mission'`;
-        assert.equal(rows[0]?.revision, 0);
+          snapshot_json: string;
+        }>`SELECT revision, snapshot_json FROM projection_missions WHERE mission_id = 'mission'`;
+        assert.equal(rows[0]?.revision, invalidation === "credential revocation" ? 0 : 1);
+        assert.deepEqual(
+          decodeMissionJson(rows[0]!.snapshot_json).execution?.retroSkillEvaluations,
+          [],
+        );
         assert.deepEqual(h.opened, []);
       }),
     ),
