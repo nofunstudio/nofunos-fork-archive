@@ -3,7 +3,10 @@ import * as Admission from "./Admission.ts";
 import * as MissionWorkerResults from "./MissionWorkerResults.ts";
 import * as MissionAdmissionFacts from "./MissionAdmissionFacts.ts";
 import * as MissionAdmissionStore from "./MissionAdmissionStore.ts";
+import * as MissionAdmissionConfiguration from "./MissionAdmissionConfiguration.ts";
 import * as MissionService from "./MissionService.ts";
+import * as MissionAdmissionRuntime from "./MissionAdmissionRuntime.ts";
+import * as MissionMcpAuthority from "../mcp/MissionMcpAuthority.ts";
 import * as UsageLimitRecoveryWorker from "./UsageLimitRecoveryWorker.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
 import * as Layer from "effect/Layer";
@@ -217,7 +220,14 @@ const layerMissionAdmissionProvided = Layer.unwrap(
       Option.isNone(authority)
         ? Layer.empty
         : MissionAdmissionStore.layer.pipe(
-            Layer.provide(Layer.merge(layerEventInfrastructure, MissionAdmissionFacts.layer)),
+            Layer.provide(
+              Layer.merge(
+                layerEventInfrastructure,
+                MissionAdmissionFacts.layer.pipe(
+                  Layer.provide(MissionAdmissionConfiguration.layer),
+                ),
+              ),
+            ),
             Layer.provide(Layer.succeed(MissionService.MissionAuthority, authority.value)),
           ),
     ),
@@ -409,4 +419,11 @@ export const layerMissionManagerLifecycle = Layer.mergeAll(
     Layer.provide(layerMissionManagerRuntimeAdapter),
     Layer.provide(layerEventInfrastructure),
   ),
+);
+
+/** Bound per public invocation, over the same runtime and SQL as all other mission tools. */
+export const layerMissionAdmissionRuntime = MissionAdmissionRuntime.layer.pipe(
+  Layer.provide(MissionAdmissionConfiguration.layer),
+  Layer.provide(MissionMcpAuthority.layer),
+  Layer.provide(layerEventInfrastructure),
 );

@@ -228,10 +228,40 @@ The attempt key uses the canonical admission identity; a client request id
 cannot authorize another attempt. Omit `mission` for ordinary delegation.
 
 Mission calls stay denied before creating a worktree or child when trusted
-admission authority is unavailable. Canonical task scopes and provider
-attestations now survive the B-02c contracts, but their trusted facts producer
-and request binding are not wired at this entry point (B-02d). A selector or
-caller-supplied authority does not bypass that refusal.
+admission authority is unavailable. The server composes the request-scoped
+`MissionAdmissionRuntime` over the same SQL and ThreadManagement services. It
+uses the current mission-policy resolver and credential registry, canonical
+mission scopes and accepted dependency receipts, the exact provider's passive
+quota, and local host capacity. An opaque credential/policy guard is rechecked
+inside the admission transaction, including replay.
+
+The public `delegate_task` mission branch still refuses until its owning MCP
+lane calls that runtime binding. The runtime test's admitted child is not
+installed/public-entry acceptance. No ordinary child is promoted to canonical.
+
+Admission additionally requires the owner's private `nofun/mission-admission.json`
+under this server's state directory (regular file, server uid, mode 0600, at
+most 64 KiB). Its strict version-1 schema is in
+[`MissionAdmissionConfiguration.ts`](../../apps/server/src/orchestration-v2/MissionAdmissionConfiguration.ts).
+It names the exact team/environment, company, host/boot build and toolchain
+qualification, observed repository realpaths/ancestry, and per-instance
+account/billing/model/profile/capability attestations. The owner records these
+from actual observations; an authenticated provider alone is not an account,
+company, billing or route grant. No tool accepts or edits this file. Removing
+or invalidating it denies the next preparation. Account, host and repository
+observations expire after five minutes; passive quota expires after thirty
+minutes. Missing, stale, foreign or unknown facts never default to healthy.
+These freshness limits apply to fresh admissions. Exact replay skips observation
+timestamp checks and returns its recorded receipt, but still requires valid
+configuration, a matching provider entry, a live credential and current policy.
+This is host qualification, not executable SHA attestation (J01 gate 3).
+
+The binding accepts an existing canonical checkout only. Explicit workspace
+preparation remains denied until its lifecycle can follow admission without
+orphan reservations; callers must not prepare a worktree before this binding.
+The task's canonical admission scopes and `taskNecessary` must be present.
+Changing them invalidates prior task attempt references even with the same
+`specHash`. Ordinary delegation remains opt-in through omission of `mission`.
 
 ### `delegate_task`
 

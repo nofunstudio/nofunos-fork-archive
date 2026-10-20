@@ -1,11 +1,5 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import {
-  CommandId,
-  EnvironmentId,
-  Mission,
-  TeamId,
-  ThreadId,
-} from "@t3tools/contracts";
+import { CommandId, EnvironmentId, Mission, TeamId, ThreadId } from "@t3tools/contracts";
 import { assert, describe, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -84,7 +78,9 @@ const missionFixture = (id: string, taskId: string) =>
     updatedAt: iso(NOW_MS - 3_600_000),
   });
 
-const trustedFacts = (overrides: Partial<MissionAdmissionStore.MissionAdmissionTrustedFacts> = {}): MissionAdmissionStore.MissionAdmissionTrustedFacts => ({
+const trustedFacts = (
+  overrides: Partial<MissionAdmissionStore.MissionAdmissionTrustedFacts> = {},
+): MissionAdmissionStore.MissionAdmissionTrustedFacts => ({
   taskNecessary: true,
   nowMs: NOW_MS,
   teamId: "team-1",
@@ -162,7 +158,12 @@ const requestFor = (
   ...overrides,
 });
 
-const keyFor = (missionId: string, taskId = "task-a", attemptNumber = 1, operation = "write" as const) =>
+const keyFor = (
+  missionId: string,
+  taskId = "task-a",
+  attemptNumber = 1,
+  operation = "write" as const,
+) =>
   dispatchKeyFor({
     teamId: "team-1",
     environmentId: "env-1",
@@ -173,14 +174,24 @@ const keyFor = (missionId: string, taskId = "task-a", attemptNumber = 1, operati
   });
 
 interface Harness {
-  readonly factsFn: (request: MissionAdmissionRequest) => MissionAdmissionStore.MissionAdmissionTrustedFacts;
+  readonly factsFn: (
+    request: MissionAdmissionRequest,
+  ) => MissionAdmissionStore.MissionAdmissionTrustedFacts;
   readonly calls: { count: number };
   readonly base: Layer.Layer<
-    MissionAdmissionStore.MissionAdmissionStore | MissionService.MissionService | EventStore.OrchestrationEventStore, never, SqlClient.SqlClient
+    | MissionAdmissionStore.MissionAdmissionStore
+    | MissionService.MissionService
+    | EventStore.OrchestrationEventStore
+    | Receipts.OrchestrationCommandReceiptRepository,
+    never,
+    SqlClient.SqlClient
   >;
 }
 
-const harness = (factsFn: (request: MissionAdmissionRequest) => MissionAdmissionStore.MissionAdmissionTrustedFacts): Harness => {
+const harness = (
+  factsFn: (request: MissionAdmissionRequest) => MissionAdmissionStore.MissionAdmissionTrustedFacts,
+  admissionAuthority: MissionService.MissionAuthority["Service"] = scope,
+): Harness => {
   const calls = { count: 0 };
   const port = Layer.succeed(MissionAdmissionStore.MissionAdmissionFactsPort, {
     readFacts: (request: MissionAdmissionRequest) =>
@@ -196,7 +207,7 @@ const harness = (factsFn: (request: MissionAdmissionRequest) => MissionAdmission
     MissionAdmissionStore.layer.pipe(
       Layer.provide(EventStore.layer),
       Layer.provide(Receipts.layer),
-      Layer.provide(authority),
+      Layer.provide(Layer.succeed(MissionService.MissionAuthority, admissionAuthority)),
       Layer.provide(port),
     ),
     MissionService.layer.pipe(
@@ -205,6 +216,7 @@ const harness = (factsFn: (request: MissionAdmissionRequest) => MissionAdmission
       Layer.provide(authority),
     ),
     EventStore.layer,
+    Receipts.layer,
   );
   return { factsFn, calls, base };
 };
@@ -227,14 +239,55 @@ const ok = (
   assert.isTrue(Result.isSuccess(result));
   return Result.getOrThrow(result);
 };
-const rejectionCode = (
-  result: MissionAdmissionStore.MissionAdmissionReserveResult,
-): string => {
+const rejectionCode = (result: MissionAdmissionStore.MissionAdmissionReserveResult): string => {
   assert.isTrue(Result.isFailure(result));
   return Result.isFailure(result) ? result.failure.code : assert.fail("expected rejection");
 };
 
 describe("MissionAdmissionStore", () => {
+  it.effect("rechecks opaque request authority inside reservation after facts were prepared", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const mission = missionFixture("mission-revoked", "task-a");
+      const requestKey = {};
+      let active = true;
+      const guard = MissionService.MissionTransactionGuard.make({
+        sql,
+        requestKey,
+        authority: scope,
+        request: { operation: "read", missionId: mission.id },
+        check: () =>
+          Effect.suspend(() =>
+            active
+              ? Effect.void
+              : Effect.fail(
+                  new MissionService.MissionServiceError({
+                    operation: "read",
+                    category: "scope_denied",
+                  }),
+                ),
+          ),
+      });
+      const h = harness(() => trustedFacts(), { ...scope, requestKey, transactionGuard: guard });
+      yield* Effect.gen(function* () {
+        yield* seed(mission);
+        const store = yield* MissionAdmissionStore.MissionAdmissionStore;
+        const prepared = yield* store.prepare(requestFor(mission));
+        active = false;
+        assert.equal((yield* prepared.reserve.pipe(Effect.flip)).category, "scope_denied");
+        const canonical = Option.getOrThrow(
+          yield* (yield* MissionService.MissionService).get(mission.id),
+        );
+        assert.deepEqual(canonical.execution?.admissions ?? [], []);
+        assert.equal(canonical.revision, 0);
+        assert.equal(
+          (yield* (yield* EventStore.OrchestrationEventStore).readMissionEvents(mission.id)).length,
+          1,
+        );
+      }).pipe(Effect.provide(h.base));
+    }).pipe(Effect.provide(Sqlite.layerMemory)),
+  );
+
   it.effect("binds prepared request and facts snapshots without rereading the port", () => {
     const facts = trustedFacts();
     const h = harness(() => facts);
@@ -351,9 +404,13 @@ describe("MissionAdmissionStore", () => {
           ["/tmp/project/work"],
         );
       }
-      const sql = yield* SqlClient.SqlClient;
-      const committed = yield* sql<{ request_hash: string }>`SELECT request_hash FROM orchestration_command_receipts WHERE command_id = ${CommandId.make(`mission-admission:${out.receipt.dispatchKey}`)}`;
-      assert.strictEqual(committed[0]?.request_hash, out.receipt.requestDigest);
+      const receipts = yield* Receipts.OrchestrationCommandReceiptRepository;
+      const committed = Option.getOrThrow(
+        yield* receipts.getByCommandId({
+          commandId: CommandId.make(`mission-admission:${out.receipt.dispatchKey}`),
+        }),
+      );
+      assert.strictEqual(committed.requestHash, out.receipt.requestDigest);
       const events = yield* EventStore.OrchestrationEventStore;
       const logged = yield* events.readMissionEvents(missionFixture("mission-1", "task-a").id);
       assert.strictEqual(logged.length, 2);
@@ -453,10 +510,17 @@ describe("MissionAdmissionStore", () => {
       });
       void exceptionFor;
       const first = ok(
-        yield* store.reserve(requestFor(missionFixture("mission-1", "task-a"), {attempt: {attemptNumber: 1, operation: "read"}})),
+        yield* store.reserve(
+          requestFor(missionFixture("mission-1", "task-a"), {
+            attempt: { attemptNumber: 1, operation: "read" },
+          }),
+        ),
       );
       assert.isTrue(first.dispatchAuthorized);
-      const second = requestFor(missionFixture("mission-2", "task-b"), { taskId: "task-b", attempt: {attemptNumber: 1, operation: "read"} });
+      const second = requestFor(missionFixture("mission-2", "task-b"), {
+        taskId: "task-b",
+        attempt: { attemptNumber: 1, operation: "read" },
+      });
       assert.strictEqual(rejectionCode(yield* store.reserve(second)), "usage_unknown");
     }).pipe(
       Effect.provide(
@@ -482,62 +546,70 @@ describe("MissionAdmissionStore", () => {
     ),
   );
 
-  it.effect("rolls back projection, event, claims, and consumption when the receipt insert fails", () =>
-    Effect.gen(function* () {
-      const store = yield* MissionAdmissionStore.MissionAdmissionStore;
-      yield* seed(missionFixture("mission-1", "task-a"));
-      const failed = yield* store.reserve(requestFor(missionFixture("mission-1", "task-a"))).pipe(
-        Effect.result,
-      );
-      assert.isTrue(Result.isFailure(failed));
-      const service = yield* MissionService.MissionService;
-      const current = yield* service.get(missionFixture("mission-1", "task-a").id);
-      assert.isTrue(Option.isSome(current) && current.value.revision === 0);
-      assert.strictEqual(Option.isSome(current) ? current.value.execution : undefined, undefined);
-      const events = yield* EventStore.OrchestrationEventStore;
-      assert.strictEqual(
-        (yield* events.readMissionEvents(missionFixture("mission-1", "task-a").id)).length,
-        1,
-      );
-    }).pipe(
-      Effect.provide(
-        (() => {
-          const failingReceipts = Layer.succeed(
-            Receipts.OrchestrationCommandReceiptRepository,
-            {
+  it.effect(
+    "rolls back projection, event, claims, and consumption when the receipt insert fails",
+    () =>
+      Effect.gen(function* () {
+        const store = yield* MissionAdmissionStore.MissionAdmissionStore;
+        yield* seed(missionFixture("mission-1", "task-a"));
+        const failed = yield* store
+          .reserve(requestFor(missionFixture("mission-1", "task-a")))
+          .pipe(Effect.result);
+        assert.isTrue(Result.isFailure(failed));
+        const service = yield* MissionService.MissionService;
+        const current = yield* service.get(missionFixture("mission-1", "task-a").id);
+        assert.isTrue(Option.isSome(current) && current.value.revision === 0);
+        assert.strictEqual(Option.isSome(current) ? current.value.execution : undefined, undefined);
+        const events = yield* EventStore.OrchestrationEventStore;
+        assert.strictEqual(
+          (yield* events.readMissionEvents(missionFixture("mission-1", "task-a").id)).length,
+          1,
+        );
+      }).pipe(
+        Effect.provide(
+          (() => {
+            const failingReceipts = Layer.succeed(Receipts.OrchestrationCommandReceiptRepository, {
               insertIfAbsent: () => Effect.succeed(false),
               upsert: () => Effect.void,
               getByCommandId: () => Effect.succeed(Option.none()),
-            },
-          );
-          const authority = Layer.succeed(MissionService.MissionAuthority, scope);
-          const port = Layer.succeed(MissionAdmissionStore.MissionAdmissionFactsPort, {
-            readFacts: () => Effect.succeed(trustedFacts({
-              usageLimits: undefined,
-              unknownUsageException: {
-                exceptionId: "rollback-ex", authorityRef: "decision", accountId: "acct-1", taskId: "task-a",
-                attemptNumber: 1, issuedAtMs: NOW_MS - 1000, expiresAtMs: NOW_MS + 1000,
-                reason: "unknown", remainingAssignments: 1,
-              },
-            })),
-          });
-          return Layer.mergeAll(
-            MissionAdmissionStore.layer.pipe(
-              Layer.provide(EventStore.layer),
-              Layer.provide(failingReceipts),
-              Layer.provide(authority),
-              Layer.provide(port),
-            ),
-            MissionService.layer.pipe(
-              Layer.provide(EventStore.layer),
-              Layer.provide(Receipts.layer),
-              Layer.provide(authority),
-            ),
-            EventStore.layer,
-          ).pipe(Layer.provideMerge(Sqlite.layerMemory));
-        })(),
+            });
+            const authority = Layer.succeed(MissionService.MissionAuthority, scope);
+            const port = Layer.succeed(MissionAdmissionStore.MissionAdmissionFactsPort, {
+              readFacts: () =>
+                Effect.succeed(
+                  trustedFacts({
+                    usageLimits: undefined,
+                    unknownUsageException: {
+                      exceptionId: "rollback-ex",
+                      authorityRef: "decision",
+                      accountId: "acct-1",
+                      taskId: "task-a",
+                      attemptNumber: 1,
+                      issuedAtMs: NOW_MS - 1000,
+                      expiresAtMs: NOW_MS + 1000,
+                      reason: "unknown",
+                      remainingAssignments: 1,
+                    },
+                  }),
+                ),
+            });
+            return Layer.mergeAll(
+              MissionAdmissionStore.layer.pipe(
+                Layer.provide(EventStore.layer),
+                Layer.provide(failingReceipts),
+                Layer.provide(authority),
+                Layer.provide(port),
+              ),
+              MissionService.layer.pipe(
+                Layer.provide(EventStore.layer),
+                Layer.provide(Receipts.layer),
+                Layer.provide(authority),
+              ),
+              EventStore.layer,
+            ).pipe(Layer.provideMerge(Sqlite.layerMemory));
+          })(),
+        ),
       ),
-    ),
   );
 
   it.effect("denies foreign team/env before facts and revalidates epoch on replay", () => {
@@ -549,14 +621,22 @@ describe("MissionAdmissionStore", () => {
       yield* seed(mission);
       ok(yield* store.reserve(requestFor(mission)));
       const count = h.calls.count;
-      for (const foreign of [{ teamId: TeamId.make("foreign") }, { authorityEnvironmentId: EnvironmentId.make("foreign") }]) {
-        const denied = yield* store.reserve(requestFor({ ...mission, ...foreign })).pipe(Effect.result);
+      for (const foreign of [
+        { teamId: TeamId.make("foreign") },
+        { authorityEnvironmentId: EnvironmentId.make("foreign") },
+      ]) {
+        const denied = yield* store
+          .reserve(requestFor({ ...mission, ...foreign }))
+          .pipe(Effect.result);
         assert.isTrue(Result.isFailure(denied));
         if (Result.isFailure(denied)) assert.strictEqual(denied.failure.category, "scope_denied");
       }
       assert.strictEqual(h.calls.count, count);
       epoch = 2;
-      assert.strictEqual(rejectionCode(yield* store.reserve(requestFor(mission))), "thread_epoch_mismatch");
+      assert.strictEqual(
+        rejectionCode(yield* store.reserve(requestFor(mission))),
+        "thread_epoch_mismatch",
+      );
     }).pipe(Effect.provide(memory(h)));
   });
 
@@ -574,7 +654,9 @@ describe("MissionAdmissionStore", () => {
             MissionAdmissionStore.MissionAdmissionStore | MissionService.MissionService
           >,
         ) =>
-          effect.pipe(Effect.provide(h.base.pipe(Layer.provideMerge(Sqlite.layerFromPath(databasePath)))));
+          effect.pipe(
+            Effect.provide(h.base.pipe(Layer.provideMerge(Sqlite.layerFromPath(databasePath)))),
+          );
         const first = yield* run(
           Effect.gen(function* () {
             const service = yield* MissionService.MissionService;
@@ -608,7 +690,9 @@ describe("MissionAdmissionStore", () => {
       yield* seed(missionFixture("mission-1", "task-a"));
       ok(yield* store.reserve(requestFor(missionFixture("mission-1", "task-a"))));
       const service = yield* MissionService.MissionService;
-      const current = Option.getOrThrow(yield* service.get(missionFixture("mission-1", "task-a").id));
+      const current = Option.getOrThrow(
+        yield* service.get(missionFixture("mission-1", "task-a").id),
+      );
       const bumped = requestFor(current, {
         attempt: { attemptNumber: 2, operation: "write" },
       });
@@ -638,27 +722,27 @@ describe("MissionAdmissionStore", () => {
     ),
   );
 
-  it.effect(
-    "reads trusted facts once per reservation with no external dispatch",
-    () => {
-      const h = harness(() => trustedFacts());
-      return Effect.gen(function* () {
-        const store = yield* MissionAdmissionStore.MissionAdmissionStore;
-        yield* seed(missionFixture("mission-1", "task-a"));
-        ok(yield* store.reserve(requestFor(missionFixture("mission-1", "task-a"))));
-        assert.strictEqual(h.calls.count, 1);
-      }).pipe(Effect.provide(memory(h)));
-    },
-  );
+  it.effect("reads trusted facts once per reservation with no external dispatch", () => {
+    const h = harness(() => trustedFacts());
+    return Effect.gen(function* () {
+      const store = yield* MissionAdmissionStore.MissionAdmissionStore;
+      yield* seed(missionFixture("mission-1", "task-a"));
+      ok(yield* store.reserve(requestFor(missionFixture("mission-1", "task-a"))));
+      assert.strictEqual(h.calls.count, 1);
+    }).pipe(Effect.provide(memory(h)));
+  });
   it.effect("serializes competing writers across canonical missions", () =>
     Effect.gen(function* () {
       yield* seed(missionFixture("mission-1", "task-a"));
       yield* seed(missionFixture("mission-2", "task-b"));
       const store = yield* MissionAdmissionStore.MissionAdmissionStore;
-      const results = yield* Effect.all([
-        store.reserve(requestFor(missionFixture("mission-1", "task-a"))),
-        store.reserve(requestFor(missionFixture("mission-2", "task-b"), {taskId: "task-b"})),
-      ], { concurrency: 2 });
+      const results = yield* Effect.all(
+        [
+          store.reserve(requestFor(missionFixture("mission-1", "task-a"))),
+          store.reserve(requestFor(missionFixture("mission-2", "task-b"), { taskId: "task-b" })),
+        ],
+        { concurrency: 2 },
+      );
       assert.strictEqual(results.filter(Result.isSuccess).length, 1);
       assert.strictEqual(results.filter(Result.isFailure).length, 1);
       assert.strictEqual(rejectionCode(results.find(Result.isFailure)!), "scope_conflict");
@@ -674,7 +758,10 @@ describe("MissionAdmissionStore", () => {
       const store = yield* MissionAdmissionStore.MissionAdmissionStore;
       ok(yield* store.reserve(requestFor(mission)));
       writerScope = "/tmp/project/other";
-      assert.strictEqual(rejectionCode(yield* store.reserve(requestFor(mission))), "digest_conflict");
+      assert.strictEqual(
+        rejectionCode(yield* store.reserve(requestFor(mission))),
+        "digest_conflict",
+      );
     }).pipe(Effect.provide(memory(h)));
   });
 
@@ -684,14 +771,27 @@ describe("MissionAdmissionStore", () => {
       yield* seed(mission);
       const store = yield* MissionAdmissionStore.MissionAdmissionStore;
       assert.strictEqual(rejectionCode(yield* store.reserve(requestFor(mission))), "usage_unknown");
-    }).pipe(Effect.provide(memory(harness(() => trustedFacts({
-      usageLimits: undefined,
-      unknownUsageException: {
-        exceptionId: "ex-2", authorityRef: "decision", accountId: "acct-1", taskId: "task-a",
-        attemptNumber: 1, issuedAtMs: NOW_MS - 1000, expiresAtMs: NOW_MS + 1000,
-        reason: "unknown", remainingAssignments: 2,
-      },
-    }))))),
+    }).pipe(
+      Effect.provide(
+        memory(
+          harness(() =>
+            trustedFacts({
+              usageLimits: undefined,
+              unknownUsageException: {
+                exceptionId: "ex-2",
+                authorityRef: "decision",
+                accountId: "acct-1",
+                taskId: "task-a",
+                attemptNumber: 1,
+                issuedAtMs: NOW_MS - 1000,
+                expiresAtMs: NOW_MS + 1000,
+                reason: "unknown",
+                remainingAssignments: 2,
+              },
+            }),
+          ),
+        ),
+      ),
+    ),
   );
-
 });

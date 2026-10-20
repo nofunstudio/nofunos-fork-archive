@@ -223,6 +223,14 @@ const taskInputsChanged = (
   if (!eqArr(cur.dependencies, nxt.dependencies)) return true;
   if (!eqArr(cur.acceptanceIds, nxt.acceptanceIds)) return true;
   if (cur.projectId !== nxt.projectId) return true;
+  if (cur.writerScope !== nxt.writerScope || cur.taskNecessary !== nxt.taskNecessary) return true;
+  for (const field of ["sharedManifestScopes", "guiScopes"] as const) {
+    const before = cur[field];
+    const after = nxt[field];
+    if (before === undefined || after === undefined) {
+      if (before !== after) return true;
+    } else if (!eqArr(before, after)) return true;
+  }
   const beforeText = new Map(current.intent.acceptanceCriteria.map((c) => [c.id, c.text] as const));
   const afterText = new Map(next.intent.acceptanceCriteria.map((c) => [c.id, c.text] as const));
   for (const id of cur.acceptanceIds) {

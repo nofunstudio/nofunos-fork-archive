@@ -333,6 +333,36 @@ describe("planMissionCommand", () => {
     );
   });
 
+  it("invalidates admission references when canonical admission authority changes without a spec hash change", () => {
+    for (const change of [
+      { writerScope: "/workspace/reassigned" },
+      { sharedManifestScopes: ["/workspace/package.json"] },
+      { guiScopes: ["/workspace/gui"] },
+      { taskNecessary: false },
+    ]) {
+      const base = missionFixture();
+      const current = decodeMission({
+        ...base,
+        tasks: base.tasks.map((task) => ({
+          ...task,
+          writerScope: "/workspace/assigned",
+          sharedManifestScopes: [],
+          guiScopes: [],
+          taskNecessary: true,
+        })),
+      });
+      const next = {
+        ...current,
+        revision: 1,
+        tasks: current.tasks.map((task, index) => (index === 0 ? { ...task, ...change } : task)),
+      };
+      const result = ok(planMissionCommand(replace(next), current, ctx));
+      assert.deepEqual(result.invalidatedAdmissionRefs, ["receipt-a"]);
+      assert.deepEqual(result.preservedAdmissionRefs, ["receipt-b"]);
+      assert.equal(result.mission.tasks[0]?.attempt, undefined);
+    }
+  });
+
   it("invalidates on dependency-hash-only change while specHash stays (root regression)", () => {
     const current = decodeMission(missionFixture());
     const base = missionFixture();
@@ -616,21 +646,63 @@ describe("planMissionCommand", () => {
 });
 
 describe("canonical manager reservation preservation", () => {
-  const reservation = { reservationId: "reserve-1", successorThreadId: "successor-1", role: "delivery", currentThreadId: "thread-1", currentEpoch: 3, observedRevision: 0, timezone: "America/Denver", localDate: "2026-10-14", ordinal: 0, reason: "first_slot", artifactRef: `manager-handoff:${"a".repeat(64)}`, artifactSha256: "a".repeat(64), commandId: "reserve-cmd", requestDigest: "b".repeat(64), reservedAt: OCCURRED_AT };
-  const execution = { admissions: [], writerClaims: [], consumedExceptionIds: [], managerReservations: [reservation] };
+  const reservation = {
+    reservationId: "reserve-1",
+    successorThreadId: "successor-1",
+    role: "delivery",
+    currentThreadId: "thread-1",
+    currentEpoch: 3,
+    observedRevision: 0,
+    timezone: "America/Denver",
+    localDate: "2026-10-14",
+    ordinal: 0,
+    reason: "first_slot",
+    artifactRef: `manager-handoff:${"a".repeat(64)}`,
+    artifactSha256: "a".repeat(64),
+    commandId: "reserve-cmd",
+    requestDigest: "b".repeat(64),
+    reservedAt: OCCURRED_AT,
+  };
+  const execution = {
+    admissions: [],
+    writerClaims: [],
+    consumedExceptionIds: [],
+    managerReservations: [reservation],
+  };
   it("denies generic create with forged reservation state", () => {
     const fixture = missionFixture();
-    const proposed = { ...fixture, tasks: fixture.tasks.map(({ attempt: _attempt, ...task }) => task), execution };
-    assert.equal(code(planMissionCommand(decodeCreate({ type: "mission.create", commandId: "forge-reservation", mission: proposed }), null, ctx)), "forged_execution_state");
+    const proposed = {
+      ...fixture,
+      tasks: fixture.tasks.map(({ attempt: _attempt, ...task }) => task),
+      execution,
+    };
+    assert.equal(
+      code(
+        planMissionCommand(
+          decodeCreate({
+            type: "mission.create",
+            commandId: "forge-reservation",
+            mission: proposed,
+          }),
+          null,
+          ctx,
+        ),
+      ),
+      "forged_execution_state",
+    );
   });
   it("preserves canonical reservations against replacement omission", () => {
     const current = decodeMission({ ...missionFixture(), execution });
-    const revised = ok(planMissionCommand(replace({ ...missionFixture(), revision: 1 }), current, ctx));
+    const revised = ok(
+      planMissionCommand(replace({ ...missionFixture(), revision: 1 }), current, ctx),
+    );
     assert.deepEqual(revised.mission.execution, current.execution);
   });
   it("preserves the configured timezone when an older replacement omits it", () => {
     const current = decodeMission({ ...missionFixture(), projectTimezone: "America/Denver" });
-    const revised = ok(planMissionCommand(replace({ ...missionFixture(), revision: 1 }), current, ctx));
+    const revised = ok(
+      planMissionCommand(replace({ ...missionFixture(), revision: 1 }), current, ctx),
+    );
     assert.equal(revised.mission.projectTimezone, "America/Denver");
   });
 });
@@ -668,12 +740,31 @@ describe("canonical skill evaluation preservation", () => {
   };
   it("denies generic create with forged skill evaluation state", () => {
     const fixture = missionFixture();
-    const proposed = { ...fixture, tasks: fixture.tasks.map(({ attempt: _attempt, ...task }) => task), execution };
-    assert.equal(code(planMissionCommand(decodeCreate({ type: "mission.create", commandId: "forge-skill-eval", mission: proposed }), null, ctx)), "forged_execution_state");
+    const proposed = {
+      ...fixture,
+      tasks: fixture.tasks.map(({ attempt: _attempt, ...task }) => task),
+      execution,
+    };
+    assert.equal(
+      code(
+        planMissionCommand(
+          decodeCreate({
+            type: "mission.create",
+            commandId: "forge-skill-eval",
+            mission: proposed,
+          }),
+          null,
+          ctx,
+        ),
+      ),
+      "forged_execution_state",
+    );
   });
   it("preserves canonical skill evaluations against replacement omission or overwrite", () => {
     const current = decodeMission({ ...missionFixture(), execution });
-    const dropped = ok(planMissionCommand(replace({ ...missionFixture(), revision: 1 }), current, ctx));
+    const dropped = ok(
+      planMissionCommand(replace({ ...missionFixture(), revision: 1 }), current, ctx),
+    );
     assert.deepEqual(dropped.mission.execution, current.execution);
     const emptied = ok(
       planMissionCommand(
@@ -692,7 +783,12 @@ describe("canonical skill evaluation preservation", () => {
         replace({
           ...missionFixture(),
           revision: 1,
-          execution: { admissions: [], writerClaims: [], consumedExceptionIds: [], retroSkillEvaluations: [] },
+          execution: {
+            admissions: [],
+            writerClaims: [],
+            consumedExceptionIds: [],
+            retroSkillEvaluations: [],
+          },
         }),
         current,
         ctx,

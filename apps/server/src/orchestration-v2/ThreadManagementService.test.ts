@@ -14,6 +14,7 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
+import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -24,6 +25,8 @@ import * as TestClock from "effect/testing/TestClock";
 
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import type { MissionAdmissionRequest } from "./MissionAdmission.ts";
+import * as MissionAdmissionStore from "./MissionAdmissionStore.ts";
+import * as RuntimePolicy from "./RuntimePolicy.ts";
 import type { ProviderAdapterV2Shape } from "./ProviderAdapter.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
@@ -749,3 +752,54 @@ it.effect(
     }).pipe(Effect.provide(ThreadManagementService.layer.pipe(Layer.provide(infra))));
   },
 );
+
+it.effect("mission dispatch refuses a captured global store without a request-scoped store", () => {
+  const instanceId = ProviderInstanceId.make("codex");
+  const adapter = {
+    instanceId,
+    driver: ProviderDriverKind.make("codex"),
+    getCapabilities: () => Effect.succeed(CodexProviderCapabilitiesV2),
+    planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" as const }),
+    openSession: () => Effect.die("No provider process is permitted"),
+  } as ProviderAdapterV2Shape;
+  const infra = ProviderReplayHarness.layerWithRegistry(
+    { name: "thread-management-no-global-mission-store" },
+    ProviderAdapterRegistry.layerFromAdapters([adapter]),
+    { runEffectWorker: false },
+  );
+  return Effect.scoped(
+    Effect.gen(function* () {
+      // Build with a global store, then invoke without a request-scoped handle.
+      const context = yield* Layer.build(
+        ThreadManagementService.layer.pipe(
+          Layer.provide(infra),
+          Layer.provide(RuntimePolicy.layer),
+          Layer.provide(Layer.mock(MissionAdmissionStore.MissionAdmissionStore)({})),
+        ),
+      );
+      const service = Context.get(context, ThreadManagementService.ThreadManagementService);
+      const denied = yield* service
+        .dispatch(
+          {
+            type: "thread.create",
+            commandId: CommandId.make("create:mission-global-refused"),
+            threadId: ThreadId.make("thread:mission-global-refused"),
+            projectId: ProjectId.make("project:mission-global-refused"),
+            title: "Must not be created",
+            modelSelection: { instanceId, model: "gpt-6.1-sol" },
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+            createdBy: "user",
+            creationSource: "web",
+          },
+          { missionAdmissionRequest: {} as MissionAdmissionRequest },
+        )
+        .pipe(Effect.flip);
+      expect(denied).toBeInstanceOf(Orchestrator.OrchestratorDispatchError);
+      expect(denied.cause).toBe("A request-scoped mission admission store is required.");
+      expect((yield* service.getShellSnapshot()).threads).toHaveLength(0);
+    }),
+  );
+});
