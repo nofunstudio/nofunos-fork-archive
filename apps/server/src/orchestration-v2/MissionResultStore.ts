@@ -41,7 +41,7 @@ import {
   type MissionResultRecord,
   type MissionResultServerObservation,
 } from "./MissionResultReconciliation.ts";
-import { MissionAuthority } from "./MissionService.ts";
+import { MissionAuthority, MissionTransactionGuard } from "./MissionService.ts";
 
 /**
  * Dormant internal result store. Persists mission result reconciliation
@@ -201,7 +201,9 @@ export const requestHashFor = (command: MissionResultCommand): string =>
 
 const decodeMission = Schema.decodeUnknownEffect(Schema.fromJsonString(Mission));
 const encodeMission = Schema.encodeEffect(Schema.fromJsonString(Mission));
-const decodeSavedFailure = Schema.decodeUnknownEffect(Schema.fromJsonString(MissionResultReconciliationError));
+const decodeSavedFailure = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(MissionResultReconciliationError),
+);
 const encodeFailure = Schema.encodeEffect(Schema.fromJsonString(MissionResultReconciliationError));
 const isStoreError = Schema.is(MissionResultStoreError);
 
@@ -209,15 +211,25 @@ const isStoreError = Schema.is(MissionResultStoreError);
 export const canonicalResultDigests = (mission: Mission, taskId: string) => {
   const task = mission.tasks.find((entry) => entry.id === taskId);
   if (!task) return undefined;
-  const hash = (value: unknown) => NodeCrypto.createHash("sha256").update(stableStringify(value)).digest("hex");
+  const hash = (value: unknown) =>
+    NodeCrypto.createHash("sha256").update(stableStringify(value)).digest("hex");
   return {
     inputDigest: task.specHash,
     dependencyDigest: hash({ ids: task.dependencies, hashes: task.dependencyHashes }),
-    acceptanceDigest: hash(task.acceptanceIds.map((id) => mission.intent.acceptanceCriteria.find((criterion) => criterion.id === id))),
+    acceptanceDigest: hash(
+      task.acceptanceIds.map((id) =>
+        mission.intent.acceptanceCriteria.find((criterion) => criterion.id === id),
+      ),
+    ),
   };
 };
-const digestsMatch = (a: MissionResultTrustedAssociation["digests"], b: MissionResultTrustedAssociation["digests"]) =>
-  a.inputDigest === b.inputDigest && a.dependencyDigest === b.dependencyDigest && a.acceptanceDigest === b.acceptanceDigest;
+const digestsMatch = (
+  a: MissionResultTrustedAssociation["digests"],
+  b: MissionResultTrustedAssociation["digests"],
+) =>
+  a.inputDigest === b.inputDigest &&
+  a.dependencyDigest === b.dependencyDigest &&
+  a.acceptanceDigest === b.acceptanceDigest;
 
 const DISPOSITIONS: ReadonlySet<string> = new Set([
   "advanced",
@@ -258,17 +270,23 @@ const make = Effect.gen(function* () {
     failure: MissionResultReconciliationError,
   ) {
     const failedAt = DateTime.formatIso(DateTime.makeUnsafe(yield* Clock.currentTimeMillis));
-    if (!(yield* receipts.insertIfAbsent({
-      commandId: command.commandId,
-      aggregateKind: "mission",
-      aggregateId: missionId,
-      commandType: commandTypeFor(command.action),
-      acceptedAt: failedAt,
-      resultSequence: 0,
-      status: "rejected",
-      error: yield* encodeFailure(failure),
-      requestHash,
-    }))) return yield* new MissionResultStoreError({ operation: "execute", category: "request_conflict" });
+    if (
+      !(yield* receipts.insertIfAbsent({
+        commandId: command.commandId,
+        aggregateKind: "mission",
+        aggregateId: missionId,
+        commandType: commandTypeFor(command.action),
+        acceptedAt: failedAt,
+        resultSequence: 0,
+        status: "rejected",
+        error: yield* encodeFailure(failure),
+        requestHash,
+      }))
+    )
+      return yield* new MissionResultStoreError({
+        operation: "execute",
+        category: "request_conflict",
+      });
     return Result.fail(failure);
   });
 
@@ -297,6 +315,20 @@ const make = Effect.gen(function* () {
         operation: "execute",
         category: "persistence",
       });
+    }
+    // Public request-scoped authority must remain live at the owning commit,
+    // including on exact replay. Internal/offline authorities keep their contract.
+    if (authority.transactionGuard !== undefined) {
+      yield* MissionTransactionGuard.check({
+        sql,
+        authority,
+        request: { operation: "read", missionId: canonical.id },
+        expectedMission: canonical,
+      }).pipe(
+        Effect.mapError(
+          () => new MissionResultStoreError({ operation: "execute", category: "scope_denied" }),
+        ),
+      );
     }
     if (trusted.teamId !== authority.teamId || trusted.environmentId !== authority.environmentId) {
       return yield* new MissionResultStoreError({
@@ -338,11 +370,14 @@ const make = Effect.gen(function* () {
             category: "persistence",
           });
         }
-        return Result.fail(yield* decodeSavedFailure(saved.error).pipe(Effect.mapError(toStoreError)));
+        return Result.fail(
+          yield* decodeSavedFailure(saved.error).pipe(Effect.mapError(toStoreError)),
+        );
       }
       const logged = yield* events.readMissionEvents(canonical.id);
       const reconciled = logged.find(
-        (event) => event.type === "mission.result-reconciled" && event.commandId === command.commandId,
+        (event) =>
+          event.type === "mission.result-reconciled" && event.commandId === command.commandId,
       );
       if (reconciled === undefined || reconciled.type !== "mission.result-reconciled") {
         return yield* new MissionResultStoreError({
@@ -353,10 +388,7 @@ const make = Effect.gen(function* () {
       const record = reconciled.payload.mission.execution?.results?.find(
         (result) => result.taskId === command.taskId,
       );
-      if (
-        record === undefined ||
-        !DISPOSITIONS.has(reconciled.payload.disposition)
-      ) {
+      if (record === undefined || !DISPOSITIONS.has(reconciled.payload.disposition)) {
         return yield* new MissionResultStoreError({
           operation: "execute",
           category: "persistence",
@@ -384,38 +416,95 @@ const make = Effect.gen(function* () {
     const current = index === -1 ? undefined : results[index];
 
     const task = canonical.tasks.find((entry) => entry.id === command.taskId);
-    const admission = execution.admissions.find((entry) => entry.dispatchKey === command.dispatchKey);
+    const admission = execution.admissions.find(
+      (entry) => entry.dispatchKey === command.dispatchKey,
+    );
     const digests = canonicalResultDigests(canonical, command.taskId);
     const binding = canonical.bindings.find((entry) => entry.projectId === task?.projectId);
-    const requiredAncestry = binding === undefined ? [] : [...new Set([binding.baseCommit, ...binding.ancestry])];
+    const requiredAncestry =
+      binding === undefined ? [] : [...new Set([binding.baseCommit, ...binding.ancestry])];
     const association = trusted.association;
-    const associationValid = task !== undefined && binding !== undefined && digests !== undefined &&
-      command.dispatchKey === association.admissionDispatchKey && admission !== undefined &&
-      admission.taskId === command.taskId && admission.attemptNumber === association.attemptNumber &&
-      admission.requestDigest === association.admissionRequestDigest && digestsMatch(association.digests, digests) &&
+    const associationValid =
+      task !== undefined &&
+      binding !== undefined &&
+      digests !== undefined &&
+      command.dispatchKey === association.admissionDispatchKey &&
+      admission !== undefined &&
+      admission.taskId === command.taskId &&
+      admission.attemptNumber === association.attemptNumber &&
+      admission.requestDigest === association.admissionRequestDigest &&
+      digestsMatch(association.digests, digests) &&
       requiredAncestry.length === association.requiredAncestry.length &&
       requiredAncestry.every((ref) => association.requiredAncestry.includes(ref)) &&
-      requiredAncestry.every((ref) => association.initialAncestry.includes(ref) || association.initialCommitSet.includes(ref));
-    if (!associationValid || (current !== undefined && current.attemptNumber !== association.attemptNumber)) {
-      return yield* persistRejection(command, canonical.id, requestHash, new MissionResultReconciliationError({ operation: command.action === "initialize" ? "initialize" : "freshness", category: "digest_mismatch", detail: "Current task, admission, ancestry and runtime association do not match." }));
+      requiredAncestry.every(
+        (ref) =>
+          association.initialAncestry.includes(ref) || association.initialCommitSet.includes(ref),
+      );
+    if (
+      !associationValid ||
+      (current !== undefined && current.attemptNumber !== association.attemptNumber)
+    ) {
+      return yield* persistRejection(
+        command,
+        canonical.id,
+        requestHash,
+        new MissionResultReconciliationError({
+          operation: command.action === "initialize" ? "initialize" : "freshness",
+          category: "digest_mismatch",
+          detail: "Current task, admission, ancestry and runtime association do not match.",
+        }),
+      );
     }
-    if (["review", "accept", "integrate", "installed_delivery"].includes(command.action) &&
-      current !== undefined && digests !== undefined && !digestsMatch(current.digests, digests)) {
-      return yield* persistRejection(command, canonical.id, requestHash, new MissionResultReconciliationError({ operation: "freshness", category: "digest_mismatch", detail: "Result inputs or acceptance criteria changed; re-review current work." }));
+    if (
+      ["review", "accept", "integrate", "installed_delivery"].includes(command.action) &&
+      current !== undefined &&
+      digests !== undefined &&
+      !digestsMatch(current.digests, digests)
+    ) {
+      return yield* persistRejection(
+        command,
+        canonical.id,
+        requestHash,
+        new MissionResultReconciliationError({
+          operation: "freshness",
+          category: "digest_mismatch",
+          detail: "Result inputs or acceptance criteria changed; re-review current work.",
+        }),
+      );
     }
 
     let decided: ReturnType<typeof reconcileTerminalArrival>;
     if (command.action === "initialize") {
       if (command.summaryText === undefined || command.outcome === undefined) {
-        decided = refuse("initialize", "invalid_transition", "Initialize requires summaryText and outcome.");
+        decided = refuse(
+          "initialize",
+          "invalid_transition",
+          "Initialize requires summaryText and outcome.",
+        );
       } else if (current !== undefined) {
-        decided = refuse("initialize", "invalid_transition", "A result record already exists; use arrival and review commands.");
+        decided = refuse(
+          "initialize",
+          "invalid_transition",
+          "A result record already exists; use arrival and review commands.",
+        );
       } else if (results.length >= MAX_MISSION_EXECUTION_RESULTS) {
-        decided = refuse("initialize", "invalid_transition", "Mission result bound reached; history is preserved and no further results are accepted.");
+        decided = refuse(
+          "initialize",
+          "invalid_transition",
+          "Mission result bound reached; history is preserved and no further results are accepted.",
+        );
       } else if (command.dispatchKey !== trusted.association.admissionDispatchKey) {
-        decided = refuse("initialize", "digest_mismatch", "Command dispatch key does not match the trusted admission dispatch key.");
+        decided = refuse(
+          "initialize",
+          "digest_mismatch",
+          "Command dispatch key does not match the trusted admission dispatch key.",
+        );
       } else if (canonical.tasks.find((task) => task.id === command.taskId) === undefined) {
-        decided = refuse("initialize", "invalid_transition", "No canonical task matches the command task.");
+        decided = refuse(
+          "initialize",
+          "invalid_transition",
+          "No canonical task matches the command task.",
+        );
       } else {
         const admission = execution.admissions.find(
           (entry) => entry.dispatchKey === trusted.association.admissionDispatchKey,
@@ -425,7 +514,11 @@ const make = Effect.gen(function* () {
           admission.taskId !== command.taskId ||
           admission.attemptNumber !== trusted.association.attemptNumber
         ) {
-          decided = refuse("initialize", "digest_mismatch", "No canonical admission matches the trusted dispatch key, task, and attempt.");
+          decided = refuse(
+            "initialize",
+            "digest_mismatch",
+            "No canonical admission matches the trusted dispatch key, task, and attempt.",
+          );
         } else {
           const association = trusted.association;
           decided = Result.succeed({
@@ -475,7 +568,11 @@ const make = Effect.gen(function* () {
         current === undefined
           ? refuse("observe", "invalid_transition", "No result record exists; initialize first.")
           : trusted.observation === undefined
-            ? refuse("observe", "invalid_transition", "No authoritative server observation is available.")
+            ? refuse(
+                "observe",
+                "invalid_transition",
+                "No authoritative server observation is available.",
+              )
             : applyServerObservation({ record: current, observation: trusted.observation });
     } else if (
       command.action === "review" ||
@@ -484,11 +581,23 @@ const make = Effect.gen(function* () {
       command.action === "installed_delivery"
     ) {
       if (current === undefined) {
-        decided = refuse(command.action, "invalid_transition", "No result record exists; initialize first.");
+        decided = refuse(
+          command.action,
+          "invalid_transition",
+          "No result record exists; initialize first.",
+        );
       } else if (command.receipt === undefined) {
-        decided = refuse(command.action, "evidence_mismatch", "A decision command requires a receipt.");
+        decided = refuse(
+          command.action,
+          "evidence_mismatch",
+          "A decision command requires a receipt.",
+        );
       } else if (command.receipt.decidedBy !== authority.controllerThreadId) {
-        decided = refuse(command.action, "evidence_mismatch", "The receipt approval actor must match the authenticated runtime controller.");
+        decided = refuse(
+          command.action,
+          "evidence_mismatch",
+          "The receipt approval actor must match the authenticated runtime controller.",
+        );
       } else if (command.action === "review") {
         decided = reviewMissionResult({ record: current, receipt: command.receipt });
       } else if (command.action === "accept") {
@@ -496,7 +605,11 @@ const make = Effect.gen(function* () {
       } else if (command.action === "integrate") {
         decided = integrateMissionResult({ record: current, receipt: command.receipt });
       } else if (trusted.installedBuildRef === undefined) {
-        decided = refuse("installed_delivery", "evidence_mismatch", "No trusted expected build is available; a proposal cannot choose one.");
+        decided = refuse(
+          "installed_delivery",
+          "evidence_mismatch",
+          "No trusted expected build is available; a proposal cannot choose one.",
+        );
       } else {
         decided = recordInstalledDelivery({
           record: current,
@@ -507,7 +620,11 @@ const make = Effect.gen(function* () {
     } else if (command.action === "mailbox_ack") {
       decided =
         current === undefined
-          ? refuse("acknowledge", "invalid_transition", "No result record exists; initialize first.")
+          ? refuse(
+              "acknowledge",
+              "invalid_transition",
+              "No result record exists; initialize first.",
+            )
           : acknowledgeMailboxDelivery({ record: current });
     } else if (command.action === "reject") {
       decided =
@@ -519,7 +636,11 @@ const make = Effect.gen(function* () {
     } else {
       // The command type is a TS interface, not wire validation: an unknown
       // runtime action fails closed and never mutates the record.
-      decided = refuse("reject", "invalid_transition", "Unknown result action; the command was not applied.");
+      decided = refuse(
+        "reject",
+        "invalid_transition",
+        "Unknown result action; the command was not applied.",
+      );
     }
     if (Result.isFailure(decided)) {
       return yield* persistRejection(command, canonical.id, requestHash, decided.failure);
@@ -604,9 +725,9 @@ const make = Effect.gen(function* () {
     const trusted = yield* factsPort.readFacts(command);
     const requestHash = requestHashFor(command);
     const runOnce = () =>
-      sql.withTransaction(executeTransaction(trusted, command, requestHash)).pipe(
-        Effect.mapError(toStoreError),
-      );
+      sql
+        .withTransaction(executeTransaction(trusted, command, requestHash))
+        .pipe(Effect.mapError(toStoreError));
     const first = yield* runOnce().pipe(Effect.result);
     if (Result.isFailure(first)) {
       // A lost CAS race or receipt collision means a concurrent command won;

@@ -76,9 +76,13 @@ import * as Option from "effect/Option";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import * as MissionResultStore from "../orchestration-v2/MissionResultStore.ts";
 import * as MissionService from "../orchestration-v2/MissionService.ts";
+import * as EventStore from "../persistence/OrchestrationEventStore.ts";
+import * as Receipts from "../persistence/OrchestrationCommandReceipts.ts";
+import * as MissionMcpAuthority from "./MissionMcpService.ts";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import { usageHeadroomObservation } from "./usageHeadroom.ts";
 import { makeProviderCapacityReader } from "../orchestration-v2/ProviderCapacity.ts";
@@ -277,14 +281,49 @@ function missionResultStoreFailure(
 }
 
 /**
+ * Bounded authority failures for mission result decisions. The resolver's
+ * fixed codes collapse to the orchestrator's own bounded codes; resolver
+ * detail is never echoed.
+ */
+function missionResultAuthorityFailure(
+  tool: string,
+  error: MissionMcpAuthority.MissionMcpFailure,
+): OrchestratorMcpFailure {
+  switch (error.code) {
+    case "capability_denied":
+    case "scope_denied":
+      return failure(
+        "capability_denied",
+        "The calling thread is not the current delivery manager for this mission.",
+      );
+    case "thread_credential_required":
+      return failure(
+        "thread_credential_required",
+        `${tool} acts as the calling T3 thread, so it needs an agent running inside T3 Code. This MCP client signed in from outside a thread.`,
+      );
+    case "authority_unavailable":
+      return failure("orchestration_error", "Mission result authority is not configured.");
+    default:
+      return failure(
+        "capability_denied",
+        "The calling thread is not the current delivery manager for this mission.",
+      );
+  }
+}
+
+/**
  * One mission result promotion step through the result store. The caller
  * supplies only the persisted selector, the expected revision, and the
- * decision receipt: the delivery epoch, admission dispatch key, and current
- * record all come from the canonical mission read on the same injected
- * mission service, and the store revalidates every one of them against
- * trusted runtime facts before writing. Unknown selectors, a non-manager
- * caller, a wrong-kind receipt, and store refusals all fail closed with a
- * typed refusal and no write.
+ * decision receipt. Every invocation first resolves the request-bound
+ * mission authority for the actual caller scope and binds
+ * scope.environmentId to the mission authority, denying fail-closed on
+ * scope_denied or an environment mismatch. The canonical reads and the
+ * owning write then run under one request-scoped authority whose
+ * transaction guard the store re-checks inside its write transaction, so a
+ * credential or policy revoked after resolution still fails closed,
+ * including on exact replay. Unknown selectors, a non-manager caller, a
+ * wrong-kind receipt, and store refusals all fail closed with a typed
+ * refusal and no write.
  */
 function decideMissionResult(input: {
   readonly scope: McpThreadInvocationScope;
@@ -317,22 +356,89 @@ function decideMissionResult(input: {
         `${tool} requires an ${expectedKind} receipt binding the exact producing revision and commit set.`,
       );
     }
-    // Both stores are optional: existing compositions keep compiling and the
-    // calls stay fail-closed until root wires result authority, exactly like
-    // the unwired mission admission branch below.
-    const missions = yield* Effect.serviceOption(MissionService.MissionService);
-    if (Option.isNone(missions)) {
+    // Every decision resolves the request-bound mission authority for the
+    // actual caller scope first: replay re-resolves too, so a revoked
+    // credential or a mismatched environment refuses instead of recovering.
+    const authorityPort = yield* Effect.serviceOption(MissionMcpAuthority.MissionMcpAuthorityPort);
+    if (Option.isNone(authorityPort)) {
       return yield* failure("orchestration_error", "Mission result authority is not configured.");
     }
-    const results = yield* Effect.serviceOption(MissionResultStore.MissionResultStore);
-    if (Option.isNone(results)) {
-      return yield* failure("orchestration_error", "Mission result authority is not configured.");
-    }
-    const canonical = yield* missions.value
-      .get(MissionId.make(selector.missionId))
-      .pipe(
-        Effect.mapError(() => failure("orchestration_error", "Mission storage is unavailable.")),
+    const requestKey = {};
+    const facts = yield* authorityPort.value
+      .resolve({
+        scope,
+        operation: "read",
+        missionId: MissionId.make(selector.missionId),
+        requestKey,
+      })
+      .pipe(Effect.mapError((error) => missionResultAuthorityFailure(tool, error)));
+    // Bind the resolved authority to the actual caller and verified facts:
+    // the resolver may not move a decision to another environment, hand it
+    // another thread's control, or claim an unverified company/binding, and
+    // plain facts never authorize I/O without a transaction guard.
+    if (
+      facts.company !== "nofun" ||
+      facts.companyVerified !== true ||
+      facts.bindingVerified !== true ||
+      facts.environmentId !== scope.environmentId ||
+      facts.controllerThreadId !== scope.thread.threadId ||
+      facts.transactionGuard === undefined
+    ) {
+      return yield* failure(
+        "capability_denied",
+        "The calling thread is not the current delivery manager for this mission.",
       );
+    }
+    // One request-scoped authority for the canonical reads and the owning
+    // write: the store re-checks the exact guard inside its write
+    // transaction, so a credential or policy revoked after resolution still
+    // fails closed. Compositions without result stores stay fail-closed,
+    // exactly like the unwired mission admission branch below.
+    const sql = yield* Effect.serviceOption(SqlClient.SqlClient);
+    const events = yield* Effect.serviceOption(EventStore.OrchestrationEventStore);
+    const receipts = yield* Effect.serviceOption(Receipts.OrchestrationCommandReceiptRepository);
+    const factsPort = yield* Effect.serviceOption(MissionResultStore.MissionResultFactsPort);
+    if (
+      Option.isNone(sql) ||
+      Option.isNone(events) ||
+      Option.isNone(receipts) ||
+      Option.isNone(factsPort)
+    ) {
+      return yield* failure("orchestration_error", "Mission result authority is not configured.");
+    }
+    const authority: MissionService.MissionAuthority["Service"] = {
+      teamId: facts.teamId,
+      environmentId: facts.environmentId,
+      controllerThreadId: facts.controllerThreadId,
+      transactionGuard: facts.transactionGuard,
+      requestKey,
+    };
+    const base = Layer.mergeAll(
+      Layer.succeed(SqlClient.SqlClient, sql.value),
+      Layer.succeed(EventStore.OrchestrationEventStore, events.value),
+      Layer.succeed(Receipts.OrchestrationCommandReceiptRepository, receipts.value),
+      Layer.succeed(MissionService.MissionAuthority, authority),
+      Layer.succeed(MissionResultStore.MissionResultFactsPort, factsPort.value),
+    );
+    // A request must never reuse a globally memoized, guard-less service.
+    const missions = yield* MissionService.MissionService.pipe(
+      Effect.provide(MissionService.layer.pipe(Layer.provide(base)), { local: true }),
+    );
+    const results = yield* MissionResultStore.MissionResultStore.pipe(
+      Effect.provide(MissionResultStore.layer.pipe(Layer.provide(base)), { local: true }),
+    );
+    const missionReadFailure = (
+      error: MissionService.MissionServiceError,
+    ): OrchestratorMcpFailure =>
+      error.category === "scope_denied"
+        ? failure(
+            "capability_denied",
+            "The calling thread is not the current delivery manager for this mission.",
+          )
+        : failure("orchestration_error", "Mission storage is unavailable.");
+    const canonical = yield* missions
+      .get(MissionId.make(selector.missionId))
+      .pipe(Effect.mapError(missionReadFailure));
     if (Option.isNone(canonical)) {
       return yield* failure(
         "task_not_found",
@@ -369,7 +475,7 @@ function decideMissionResult(input: {
       return yield* failure("task_not_found", `No admitted attempt matches the ${tool} selector.`);
     }
     const commandId = stableCommandId({ scope, requestKey: key, operation });
-    const decided = yield* results.value
+    const decided = yield* results
       .execute({
         commandId,
         missionId: mission.id,
@@ -387,11 +493,7 @@ function decideMissionResult(input: {
     const execution = decided.success;
     // Re-read the canonical revision after the decision: a replay after
     // later writes must report the current revision, not expectedRevision + 1.
-    const current = yield* missions.value
-      .get(mission.id)
-      .pipe(
-        Effect.mapError(() => failure("orchestration_error", "Mission storage is unavailable.")),
-      );
+    const current = yield* missions.get(mission.id).pipe(Effect.mapError(missionReadFailure));
     if (Option.isNone(current)) {
       return yield* failure("orchestration_error", "Mission storage is unavailable.");
     }

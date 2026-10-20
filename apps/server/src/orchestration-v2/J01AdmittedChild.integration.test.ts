@@ -46,12 +46,14 @@ import * as ProjectService from "../project/ProjectService.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as OrchestratorMcpService from "../mcp/OrchestratorMcpService.ts";
+import * as MissionMcpService from "../mcp/MissionMcpService.ts";
+const decodeMission = Schema.decodeUnknownSync(Mission);
 const authority = {
   teamId: TeamId.make("team-admission"),
   environmentId: EnvironmentId.make("environment-admission"),
   controllerThreadId: ThreadId.make("delivery-admission"),
 };
-const mission = Schema.decodeUnknownSync(Mission)({
+const mission = decodeMission({
   schemaVersion: 1,
   id: "J01-offline-admission-prerequisite",
   revision: 0,
@@ -270,7 +272,7 @@ it.effect(
     };
     const missionId = "J01-gate-2-result-accept";
     const taskId = "task-result-accept";
-    const mission = Schema.decodeUnknownSync(Mission)({
+    const mission = decodeMission({
       schemaVersion: 1,
       id: missionId,
       revision: 0,
@@ -445,8 +447,88 @@ it.effect(
     // stays Layer.empty here and the stub-wired store below is the only
     // admission instance. Production wires the trusted facts ports (BK1).
     const withAuthority = Layer.succeed(Missions.MissionAuthority, authority);
+    // Request-scoped result decisions resolve this allowing authority and
+    // re-check its transaction guard inside every canonical read and write.
+    // The guard re-reads the team/environment/manager binding, so a revoked
+    // credential or a rotated epoch fails closed instead of mutating.
+    const authorityPort = Layer.effect(
+      MissionMcpService.MissionMcpAuthorityPort,
+      Effect.map(SqlClient.SqlClient, (sql) =>
+        MissionMcpService.MissionMcpAuthorityPort.of({
+          resolve: (request) => {
+            if (request.requestKey === undefined) {
+              return Effect.fail(
+                new MissionMcpService.MissionMcpFailure({
+                  code: "authority_unavailable",
+                  message: "A request key is required.",
+                }),
+              );
+            }
+            const facts = {
+              company: "nofun" as const,
+              companyVerified: true as const,
+              bindingVerified: true as const,
+              teamId: TeamId.make("team-j01-g2"),
+              environmentId: request.scope.environmentId,
+              controllerThreadId: request.scope.thread.threadId,
+            };
+            return Effect.succeed({
+              ...facts,
+              transactionGuard: Missions.MissionTransactionGuard.make({
+                sql,
+                requestKey: request.requestKey,
+                request: { operation: "read" as const, missionId: request.missionId },
+                authority: {
+                  teamId: facts.teamId,
+                  environmentId: facts.environmentId,
+                  controllerThreadId: facts.controllerThreadId,
+                },
+                check: () =>
+                  Effect.gen(function* () {
+                    const rows = yield* sql<{
+                      team_id: string;
+                      authority_environment_id: string;
+                      manager: string | null;
+                    }>`SELECT team_id, authority_environment_id, json_extract(snapshot_json, '$.managers.delivery.threadId') AS manager
+                      FROM projection_missions WHERE mission_id = ${request.missionId}`;
+                    const row = rows[0];
+                    if (
+                      row !== undefined &&
+                      (row.team_id !== facts.teamId ||
+                        row.authority_environment_id !== facts.environmentId ||
+                        row.manager !== facts.controllerThreadId)
+                    ) {
+                      return yield* new Missions.MissionServiceError({
+                        operation: "read",
+                        category: "scope_denied",
+                      });
+                    }
+                  }).pipe(
+                    Effect.mapError(
+                      () =>
+                        new Missions.MissionServiceError({
+                          operation: "read",
+                          category: "scope_denied",
+                        }),
+                    ),
+                  ),
+              }),
+            });
+          },
+        }),
+      ),
+    );
+    // The request-scoped decision reads the same stub facts the injected
+    // store uses: the port must also be visible in the handler's outer
+    // context, not only inside the store layer pipe.
+    const resultFactsPort = Layer.succeed(MissionResultStore.MissionResultFactsPort, {
+      readFacts: () => Effect.succeed(resultState.facts),
+    });
     const runtimeServices = Layer.mergeAll(
       RuntimeLayer.layer,
+      RuntimeLayer.layerEventInfrastructure,
+      authorityPort,
+      resultFactsPort,
       Missions.layer.pipe(
         Layer.provide(RuntimeLayer.layerEventInfrastructure),
         Layer.provide(withAuthority),
@@ -462,11 +544,7 @@ it.effect(
       ),
       MissionResultStore.layer.pipe(
         Layer.provide(RuntimeLayer.layerEventInfrastructure),
-        Layer.provide(
-          Layer.succeed(MissionResultStore.MissionResultFactsPort, {
-            readFacts: () => Effect.succeed(resultState.facts),
-          }),
-        ),
+        Layer.provide(resultFactsPort),
         Layer.provide(withAuthority),
       ),
     );
