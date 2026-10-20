@@ -2021,6 +2021,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
 
         const mac = config.mac as Record<string, unknown>;
         assert.equal(mac.identity, "0123456789ABCDEF0123456789ABCDEF01234567");
+        assert.equal(mac.type, "development");
         assert.equal(mac.hardenedRuntime, false);
         assert.equal(mac.notarize, false);
         assert.match(String(mac.sign), /[\\/]scripts[\\/]sign-macos\.ts$/);

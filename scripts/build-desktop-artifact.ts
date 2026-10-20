@@ -2852,6 +2852,10 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
             // `security find-identity` lines, so the SHA-1 selects exactly one
             // identity. No entitlements exist for local builds, so the
             // hardened runtime stays off; there is nothing to notarize.
+            // Apple Development certificates are development-type signing.
+            // electron-builder 26 resolves an explicit SHA-1 qualifier to that
+            // identity; the post-package codesign check fails the build if not.
+            type: "development",
             identity: macLocalSigningIdentityHash,
             hardenedRuntime: false,
             notarize: false,
