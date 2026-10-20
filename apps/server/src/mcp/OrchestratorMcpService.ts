@@ -3,6 +3,7 @@ import {
   type RunId,
   isProviderAvailable,
   MessageId,
+  MissionId,
   type ModelSelection,
   NodeId,
   TurnItemId,
@@ -19,6 +20,10 @@ import {
   type OrchestratorMcpDelegateTaskInput,
   type OrchestratorMcpDelegateTaskResult,
   type OrchestratorMcpInteractionMode,
+  type OrchestratorMcpMissionResultAcceptInput,
+  type OrchestratorMcpMissionResultAcceptResult,
+  type OrchestratorMcpMissionResultIntegrateInput,
+  type OrchestratorMcpMissionResultIntegrateResult,
   type OrchestratorMcpDeleteScheduledTaskInput,
   type OrchestratorMcpRequestSecretInput,
   type OrchestratorMcpRequestSecretResult,
@@ -68,9 +73,16 @@ import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Clock from "effect/Clock";
 import * as Option from "effect/Option";
+import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as SqlClient from "effect/sql/SqlClient";
 
+import * as MissionResultStore from "../orchestration-v2/MissionResultStore.ts";
+import * as MissionService from "../orchestration-v2/MissionService.ts";
+import * as EventStore from "../persistence/OrchestrationEventStore.ts";
+import * as Receipts from "../persistence/OrchestrationCommandReceipts.ts";
+import * as MissionMcpAuthority from "./MissionMcpService.ts";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import { usageHeadroomObservation } from "./usageHeadroom.ts";
 import { makeProviderCapacityReader } from "../orchestration-v2/ProviderCapacity.ts";
@@ -141,6 +153,24 @@ export interface OrchestratorMcpServiceShape {
     scope: McpInvocationScope,
     input: OrchestratorMcpTaskCancelInput,
   ) => Effect.Effect<OrchestratorMcpTaskCancelResult, OrchestratorMcpFailure>;
+  /**
+   * Accepts one reviewed mission task result. The selector is a lookup key
+   * only; delivery-manager authority comes from the caller scope and the
+   * canonical mission, never from caller claims.
+   */
+  readonly acceptMissionResult: (
+    scope: McpInvocationScope,
+    input: OrchestratorMcpMissionResultAcceptInput,
+  ) => Effect.Effect<OrchestratorMcpMissionResultAcceptResult, OrchestratorMcpFailure>;
+  /**
+   * Integrates one accepted mission task result. Same lookup-key and
+   * exactly-once revision contract as acceptance; installed delivery stays
+   * a separate step.
+   */
+  readonly integrateMissionResult: (
+    scope: McpInvocationScope,
+    input: OrchestratorMcpMissionResultIntegrateInput,
+  ) => Effect.Effect<OrchestratorMcpMissionResultIntegrateResult, OrchestratorMcpFailure>;
   readonly createThreads: (
     scope: McpInvocationScope,
     input: OrchestratorMcpCreateThreadsInput,
@@ -224,6 +254,259 @@ function threadManagementFailure(error: unknown): OrchestratorMcpFailure {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Bounded store-infrastructure failures for mission result decisions. Domain
+ * refusals (stale record state, evidence mismatch) never reach this mapper:
+ * they stay in the decision Result with their own fixed detail.
+ */
+function missionResultStoreFailure(
+  error: MissionResultStore.MissionResultStoreError,
+): OrchestratorMcpFailure {
+  switch (error.category) {
+    case "scope_denied":
+      return failure(
+        "capability_denied",
+        "The calling thread is not the current delivery manager for this mission.",
+      );
+    case "request_conflict":
+      return failure(
+        "invalid_request",
+        "The expected revision is stale or the command id was already used for a different mission result request; re-read the mission and retry with a new clientRequestId.",
+      );
+    case "persistence":
+      return failure("orchestration_error", "Mission result storage is unavailable.");
+  }
+}
+
+/**
+ * Bounded authority failures for mission result decisions. The resolver's
+ * fixed codes collapse to the orchestrator's own bounded codes; resolver
+ * detail is never echoed.
+ */
+function missionResultAuthorityFailure(
+  tool: string,
+  error: MissionMcpAuthority.MissionMcpFailure,
+): OrchestratorMcpFailure {
+  switch (error.code) {
+    case "capability_denied":
+    case "scope_denied":
+      return failure(
+        "capability_denied",
+        "The calling thread is not the current delivery manager for this mission.",
+      );
+    case "thread_credential_required":
+      return failure(
+        "thread_credential_required",
+        `${tool} acts as the calling T3 thread, so it needs an agent running inside T3 Code. This MCP client signed in from outside a thread.`,
+      );
+    case "authority_unavailable":
+      return failure("orchestration_error", "Mission result authority is not configured.");
+    default:
+      return failure(
+        "capability_denied",
+        "The calling thread is not the current delivery manager for this mission.",
+      );
+  }
+}
+
+/**
+ * One mission result promotion step through the result store. The caller
+ * supplies only the persisted selector, the expected revision, and the
+ * decision receipt. Every invocation first resolves the request-bound
+ * mission authority for the actual caller scope and binds
+ * scope.environmentId to the mission authority, denying fail-closed on
+ * scope_denied or an environment mismatch. The canonical reads and the
+ * owning write then run under one request-scoped authority whose
+ * transaction guard the store re-checks inside its write transaction, so a
+ * credential or policy revoked after resolution still fails closed,
+ * including on exact replay. Unknown selectors, a non-manager caller, a
+ * wrong-kind receipt, and store refusals all fail closed with a typed
+ * refusal and no write.
+ */
+function decideMissionResult(input: {
+  readonly scope: McpThreadInvocationScope;
+  readonly operation: "mission-result-accept" | "mission-result-integrate";
+  readonly tool: "mission_result_accept" | "mission_result_integrate";
+  readonly action: "accept" | "integrate";
+  readonly expectedKind: "acceptance" | "integration";
+  readonly decision:
+    | OrchestratorMcpMissionResultAcceptInput
+    | OrchestratorMcpMissionResultIntegrateInput;
+  readonly key: string;
+}): Effect.Effect<
+  {
+    readonly missionId: MissionId;
+    readonly taskId: string;
+    readonly commandId: CommandId;
+    readonly committed: boolean;
+    readonly recovered: boolean;
+    readonly resultSequence: number;
+    readonly missionRevision: number;
+  },
+  OrchestratorMcpFailure
+> {
+  const { scope, operation, tool, action, expectedKind, decision, key } = input;
+  const { selector, expectedRevision, receipt } = decision;
+  return Effect.gen(function* () {
+    if (receipt.kind !== expectedKind) {
+      return yield* failure(
+        "invalid_request",
+        `${tool} requires an ${expectedKind} receipt binding the exact producing revision and commit set.`,
+      );
+    }
+    // Every decision resolves the request-bound mission authority for the
+    // actual caller scope first: replay re-resolves too, so a revoked
+    // credential or a mismatched environment refuses instead of recovering.
+    const authorityPort = yield* Effect.serviceOption(MissionMcpAuthority.MissionMcpAuthorityPort);
+    if (Option.isNone(authorityPort)) {
+      return yield* failure("orchestration_error", "Mission result authority is not configured.");
+    }
+    const requestKey = {};
+    const facts = yield* authorityPort.value
+      .resolve({
+        scope,
+        operation: "read",
+        missionId: MissionId.make(selector.missionId),
+        requestKey,
+      })
+      .pipe(Effect.mapError((error) => missionResultAuthorityFailure(tool, error)));
+    // Bind the resolved authority to the actual caller and verified facts:
+    // the resolver may not move a decision to another environment, hand it
+    // another thread's control, or claim an unverified company/binding, and
+    // plain facts never authorize I/O without a transaction guard.
+    if (
+      facts.company !== "nofun" ||
+      facts.companyVerified !== true ||
+      facts.bindingVerified !== true ||
+      facts.environmentId !== scope.environmentId ||
+      facts.controllerThreadId !== scope.thread.threadId ||
+      facts.transactionGuard === undefined
+    ) {
+      return yield* failure(
+        "capability_denied",
+        "The calling thread is not the current delivery manager for this mission.",
+      );
+    }
+    // One request-scoped authority for the canonical reads and the owning
+    // write: the store re-checks the exact guard inside its write
+    // transaction, so a credential or policy revoked after resolution still
+    // fails closed. Compositions without result stores stay fail-closed,
+    // exactly like the unwired mission admission branch below.
+    const sql = yield* Effect.serviceOption(SqlClient.SqlClient);
+    const events = yield* Effect.serviceOption(EventStore.OrchestrationEventStore);
+    const receipts = yield* Effect.serviceOption(Receipts.OrchestrationCommandReceiptRepository);
+    const factsPort = yield* Effect.serviceOption(MissionResultStore.MissionResultFactsPort);
+    if (
+      Option.isNone(sql) ||
+      Option.isNone(events) ||
+      Option.isNone(receipts) ||
+      Option.isNone(factsPort)
+    ) {
+      return yield* failure("orchestration_error", "Mission result authority is not configured.");
+    }
+    const authority: MissionService.MissionAuthority["Service"] = {
+      teamId: facts.teamId,
+      environmentId: facts.environmentId,
+      controllerThreadId: facts.controllerThreadId,
+      transactionGuard: facts.transactionGuard,
+      requestKey,
+    };
+    const base = Layer.mergeAll(
+      Layer.succeed(SqlClient.SqlClient, sql.value),
+      Layer.succeed(EventStore.OrchestrationEventStore, events.value),
+      Layer.succeed(Receipts.OrchestrationCommandReceiptRepository, receipts.value),
+      Layer.succeed(MissionService.MissionAuthority, authority),
+      Layer.succeed(MissionResultStore.MissionResultFactsPort, factsPort.value),
+    );
+    // A request must never reuse a globally memoized, guard-less service.
+    const missions = yield* MissionService.MissionService.pipe(
+      Effect.provide(MissionService.layer.pipe(Layer.provide(base)), { local: true }),
+    );
+    const results = yield* MissionResultStore.MissionResultStore.pipe(
+      Effect.provide(MissionResultStore.layer.pipe(Layer.provide(base)), { local: true }),
+    );
+    const missionReadFailure = (
+      error: MissionService.MissionServiceError,
+    ): OrchestratorMcpFailure =>
+      error.category === "scope_denied"
+        ? failure(
+            "capability_denied",
+            "The calling thread is not the current delivery manager for this mission.",
+          )
+        : failure("orchestration_error", "Mission storage is unavailable.");
+    const canonical = yield* missions
+      .get(MissionId.make(selector.missionId))
+      .pipe(Effect.mapError(missionReadFailure));
+    if (Option.isNone(canonical)) {
+      return yield* failure(
+        "task_not_found",
+        `No mission holds a result for the ${tool} selector.`,
+      );
+    }
+    const mission = canonical.value;
+    const delivery = mission.managers.delivery;
+    if (
+      delivery === undefined ||
+      delivery.threadId !== scope.thread.threadId ||
+      delivery.epoch === undefined
+    ) {
+      return yield* failure(
+        "capability_denied",
+        `Only the current delivery manager thread may call ${tool}.`,
+      );
+    }
+    const record = mission.execution?.results?.find((result) => result.taskId === selector.taskId);
+    if (
+      record === undefined ||
+      record.attemptNumber !== selector.attemptNumber ||
+      record.provenance.resultRevision !== selector.resultRevision
+    ) {
+      return yield* failure(
+        "task_not_found",
+        `No persisted task result matches the ${tool} selector.`,
+      );
+    }
+    const admission = mission.execution?.admissions?.find(
+      (entry) => entry.taskId === selector.taskId && entry.attemptNumber === selector.attemptNumber,
+    );
+    if (admission === undefined) {
+      return yield* failure("task_not_found", `No admitted attempt matches the ${tool} selector.`);
+    }
+    const commandId = stableCommandId({ scope, requestKey: key, operation });
+    const decided = yield* results
+      .execute({
+        commandId,
+        missionId: mission.id,
+        expectedRevision,
+        deliveryEpoch: delivery.epoch,
+        taskId: selector.taskId,
+        dispatchKey: admission.dispatchKey,
+        action,
+        receipt,
+      })
+      .pipe(Effect.mapError(missionResultStoreFailure));
+    if (Result.isFailure(decided)) {
+      return yield* failure("invalid_request", decided.failure.detail ?? decided.failure.message);
+    }
+    const execution = decided.success;
+    // Re-read the canonical revision after the decision: a replay after
+    // later writes must report the current revision, not expectedRevision + 1.
+    const current = yield* missions.get(mission.id).pipe(Effect.mapError(missionReadFailure));
+    if (Option.isNone(current)) {
+      return yield* failure("orchestration_error", "Mission storage is unavailable.");
+    }
+    return {
+      missionId: mission.id,
+      taskId: selector.taskId,
+      commandId,
+      committed: execution.committed,
+      recovered: execution.recovered,
+      resultSequence: execution.receipt.resultSequence,
+      missionRevision: current.value.revision,
+    };
+  });
 }
 
 /** A reference that cannot be delivered exactly as declared; its message begins `BLOCKED reference`. */
@@ -2097,7 +2380,10 @@ const make = Effect.gen(function* () {
         }
 
         if (input.mode !== "wait") {
-          return yield* readTask(scope, taskId, false, true);
+          const asyncResult = yield* readTask(scope, taskId, false, true);
+          // A replay reuses the admitted task without dispatching again, so
+          // only a fresh dispatch reports dispatchAuthorized:true.
+          return { ...asyncResult, dispatchAuthorized: existingTask === undefined };
         }
         const timeoutMs = Math.min(
           MAX_WAIT_TIMEOUT_MS,
@@ -2146,7 +2432,8 @@ const make = Effect.gen(function* () {
               }),
             ),
           );
-        return yield* readTask(scope, taskId, true, true);
+        const waitedResult = yield* readTask(scope, taskId, true, true);
+        return { ...waitedResult, dispatchAuthorized: existingTask === undefined };
       }),
     taskStatus: (callerScope, taskId) =>
       Effect.gen(function* () {
@@ -2251,6 +2538,44 @@ const make = Effect.gen(function* () {
           taskId: input.taskId,
           status: "cancel_requested",
         };
+      }),
+    acceptMissionResult: (callerScope, input) =>
+      Effect.gen(function* () {
+        yield* requireCapability(callerScope);
+        const scope = yield* requireThreadScope(callerScope, "mission_result_accept");
+        const key = yield* requestKey(input.clientRequestId);
+        const decided = yield* decideMissionResult({
+          scope,
+          operation: "mission-result-accept",
+          tool: "mission_result_accept",
+          action: "accept",
+          expectedKind: "acceptance",
+          decision: input,
+          key,
+        });
+        return {
+          ...decided,
+          state: "accepted" as const,
+        } satisfies OrchestratorMcpMissionResultAcceptResult;
+      }),
+    integrateMissionResult: (callerScope, input) =>
+      Effect.gen(function* () {
+        yield* requireCapability(callerScope);
+        const scope = yield* requireThreadScope(callerScope, "mission_result_integrate");
+        const key = yield* requestKey(input.clientRequestId);
+        const decided = yield* decideMissionResult({
+          scope,
+          operation: "mission-result-integrate",
+          tool: "mission_result_integrate",
+          action: "integrate",
+          expectedKind: "integration",
+          decision: input,
+          key,
+        });
+        return {
+          ...decided,
+          state: "integrated" as const,
+        } satisfies OrchestratorMcpMissionResultIntegrateResult;
       }),
     createThreads: (callerScope, input) =>
       Effect.gen(function* () {

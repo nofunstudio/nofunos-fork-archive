@@ -6,6 +6,10 @@ import {
   OrchestratorMcpDelegateTaskResult,
   OrchestratorMcpDeleteScheduledTaskInput,
   OrchestratorMcpDeleteScheduledTaskResult,
+  OrchestratorMcpMissionResultAcceptInput,
+  OrchestratorMcpMissionResultAcceptResult,
+  OrchestratorMcpMissionResultIntegrateInput,
+  OrchestratorMcpMissionResultIntegrateResult,
   OrchestratorMcpRequestSecretInput,
   OrchestratorMcpRequestSecretResult,
   OrchestratorMcpFailure,
@@ -97,6 +101,32 @@ const TaskCancelTool = Tool.make("task_cancel", {
   dependencies,
 })
   .annotate(Tool.Title, "Cancel delegated task")
+  .annotate(Tool.Destructive, true);
+
+export const MissionResultAcceptTool = Tool.make("mission_result_accept", {
+  description:
+    "Needs an agent running inside a T3 thread with the orchestration capability, and the calling thread must be the mission's current delivery manager. Accept one reviewed canonical mission task result selected by its persisted task-result key (mission, task, attempt, producing revision) at the given expected revision. The selector is a lookup key only; the delivery epoch and admission binding come from the canonical mission and are revalidated against trusted runtime facts. Each call advances exactly one promotion step and bumps the mission revision exactly once; reusing clientRequestId replays the same command with no new revision. Installed delivery stays a separate step and is never claimed here.",
+  parameters: OrchestratorMcpMissionResultAcceptInput,
+  success: OrchestratorMcpMissionResultAcceptResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies,
+})
+  .annotate(Tool.Strict, true)
+  .annotate(Tool.Title, "Accept a mission task result")
+  .annotate(Tool.Destructive, true);
+
+export const MissionResultIntegrateTool = Tool.make("mission_result_integrate", {
+  description:
+    "Needs an agent running inside a T3 thread with the orchestration capability, and the calling thread must be the mission's current delivery manager. Integrate one accepted canonical mission task result selected by its persisted task-result key (mission, task, attempt, producing revision) at the given expected revision. Same lookup-key and exactly-once revision contract as mission_result_accept; the integration receipt binds the exact producing revision and commit set. Installed delivery stays a separate step and is never claimed here.",
+  parameters: OrchestratorMcpMissionResultIntegrateInput,
+  success: OrchestratorMcpMissionResultIntegrateResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies,
+})
+  .annotate(Tool.Strict, true)
+  .annotate(Tool.Title, "Integrate a mission task result")
   .annotate(Tool.Destructive, true);
 
 export const ScheduleTaskTool = Tool.make("schedule_task", {
@@ -260,6 +290,8 @@ export const OrchestratorToolkit = Toolkit.make(
   DelegateTaskTool,
   TaskStatusTool,
   TaskCancelTool,
+  MissionResultAcceptTool,
+  MissionResultIntegrateTool,
   ScheduleTaskTool,
   ListScheduledTasksTool,
   UpdateScheduledTaskTool,

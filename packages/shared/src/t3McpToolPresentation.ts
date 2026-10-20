@@ -10,6 +10,8 @@ export type T3McpToolSummaryAction =
   | "delegate"
   | "task-status"
   | "task-cancel"
+  | "mission-result-accept"
+  | "mission-result-integrate"
   | "schedule-run"
   | "schedule-create"
   | "schedule-list"
@@ -117,6 +119,14 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
   task_cancel: tool(
     ["Cancel", "Canceling", "Requested cancellation of", "delegated task"],
     "task-cancel",
+  ),
+  mission_result_accept: tool(
+    ["Accept", "Accepting", "Accepted", "a mission task result"],
+    "mission-result-accept",
+  ),
+  mission_result_integrate: tool(
+    ["Integrate", "Integrating", "Integrated", "a mission task result"],
+    "mission-result-integrate",
   ),
   schedule_task: tool(
     ["Schedule", "Scheduling", "Scheduled", "a recurring task"],

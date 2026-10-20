@@ -3,6 +3,7 @@ import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
 
 import {
+  CommandId,
   ContextTransferId,
   IsoDateTime,
   MessageId,
@@ -17,6 +18,9 @@ import {
   TrimmedNonEmptyString,
   TurnItemId,
 } from "./baseSchemas.ts";
+import { MissionId } from "./mission.ts";
+import { MissionCompletionTaskResultSelector } from "./missionCompletion.ts";
+import { MissionResultReceipt } from "./missionResult.ts";
 import {
   ScheduledTaskRunStatus,
   ScheduledTaskSchedule,
@@ -309,8 +313,98 @@ export const OrchestratorMcpDelegateTaskResult = Schema.Struct({
     description:
       "True only on that mode=wait call when timeoutMs elapsed. The timeout does not cancel the child. Later task_status reads return false and use status for liveness.",
   }),
+  dispatchAuthorized: Schema.optional(Schema.Boolean).annotate({
+    description:
+      "Whether this call authorized a fresh dispatch. False when the call replayed an existing task or admission without dispatching again (for example a mission task whose result is already integrated). Absent when the read reports no dispatch decision.",
+  }),
 });
 export type OrchestratorMcpDelegateTaskResult = typeof OrchestratorMcpDelegateTaskResult.Type;
+
+/**
+ * Accept one reviewed mission task result over MCP. The persisted
+ * task-result selector is a lookup key only: the current delivery manager,
+ * epoch, and canonical revision come from the server, never from caller
+ * claims. Each call advances exactly one promotion step and bumps the
+ * mission revision exactly once; reusing clientRequestId replays the same
+ * command with no new revision.
+ */
+export const OrchestratorMcpMissionResultAcceptInput = Schema.Struct({
+  selector: MissionCompletionTaskResultSelector.annotate({
+    description:
+      "Persisted task-result lookup key: mission, task, attempt, and producing revision.",
+  }),
+  expectedRevision: NonNegativeInt.annotate({
+    description:
+      "Canonical mission revision this decision must apply to; a stale value fails closed without writing.",
+  }),
+  receipt: MissionResultReceipt.annotate({
+    description:
+      "Acceptance evidence binding the exact producing revision and commit set, decided by the current delivery manager thread.",
+  }),
+  clientRequestId: Schema.optional(OrchestratorMcpClientRequestId).annotate({
+    description:
+      "Stable idempotency key to reuse when retrying this decision; the same key replays the same command without a new revision.",
+  }),
+});
+export type OrchestratorMcpMissionResultAcceptInput =
+  typeof OrchestratorMcpMissionResultAcceptInput.Type;
+
+export const OrchestratorMcpMissionResultAcceptResult = Schema.Struct({
+  missionId: MissionId,
+  taskId: TrimmedNonEmptyString,
+  commandId: CommandId,
+  committed: Schema.Boolean,
+  recovered: Schema.Boolean,
+  resultSequence: NonNegativeInt,
+  state: Schema.Literal("accepted"),
+  missionRevision: NonNegativeInt.annotate({
+    description: "Canonical mission revision after this decision.",
+  }),
+});
+export type OrchestratorMcpMissionResultAcceptResult =
+  typeof OrchestratorMcpMissionResultAcceptResult.Type;
+
+/**
+ * Integrate one accepted mission task result over MCP. Same lookup-key and
+ * exactly-once revision contract as accept; the integration receipt binds
+ * the exact producing revision and commit set. Installed delivery stays a
+ * separate step and is never claimed here.
+ */
+export const OrchestratorMcpMissionResultIntegrateInput = Schema.Struct({
+  selector: MissionCompletionTaskResultSelector.annotate({
+    description:
+      "Persisted task-result lookup key: mission, task, attempt, and producing revision.",
+  }),
+  expectedRevision: NonNegativeInt.annotate({
+    description:
+      "Canonical mission revision this decision must apply to; a stale value fails closed without writing.",
+  }),
+  receipt: MissionResultReceipt.annotate({
+    description:
+      "Integration evidence binding the exact producing revision and commit set, decided by the current delivery manager thread.",
+  }),
+  clientRequestId: Schema.optional(OrchestratorMcpClientRequestId).annotate({
+    description:
+      "Stable idempotency key to reuse when retrying this decision; the same key replays the same command without a new revision.",
+  }),
+});
+export type OrchestratorMcpMissionResultIntegrateInput =
+  typeof OrchestratorMcpMissionResultIntegrateInput.Type;
+
+export const OrchestratorMcpMissionResultIntegrateResult = Schema.Struct({
+  missionId: MissionId,
+  taskId: TrimmedNonEmptyString,
+  commandId: CommandId,
+  committed: Schema.Boolean,
+  recovered: Schema.Boolean,
+  resultSequence: NonNegativeInt,
+  state: Schema.Literal("integrated"),
+  missionRevision: NonNegativeInt.annotate({
+    description: "Canonical mission revision after this decision.",
+  }),
+});
+export type OrchestratorMcpMissionResultIntegrateResult =
+  typeof OrchestratorMcpMissionResultIntegrateResult.Type;
 
 export const OrchestratorMcpTaskStatusInput = Schema.Struct({
   taskId: NodeId,

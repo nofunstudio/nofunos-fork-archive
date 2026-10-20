@@ -606,6 +606,8 @@ function summaryActionPriority(action: ToolGroupAction | T3McpToolSummaryAction)
     case "edit":
     case "delegate":
     case "task-cancel":
+    case "mission-result-accept":
+    case "mission-result-integrate":
     case "thread-create":
     case "thread-send":
     case "thread-interrupt":

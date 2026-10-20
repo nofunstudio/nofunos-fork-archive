@@ -178,6 +178,16 @@ export function summarizeT3ToolCalls(
         quantity(countEntities(entityIds("taskId")), "task"),
       );
       break;
+    case "mission-result-accept": {
+      const accepted = countEntities(entityIds("taskId"));
+      label = phrase("Accepted", "accept", quantity(accepted, "mission task result"));
+      break;
+    }
+    case "mission-result-integrate": {
+      const integrated = countEntities(entityIds("taskId"));
+      label = phrase("Integrated", "integrate", quantity(integrated, "mission task result"));
+      break;
+    }
     case "schedule-create":
       label = phrase(
         "Scheduled",
