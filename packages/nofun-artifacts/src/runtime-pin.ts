@@ -62,9 +62,14 @@ export function runtimeDigest(runtimeDir: string): string {
 
 /** Where built runtimes live: `NOFUN_UI_RUNTIME_ROOT`, else this package's `dist/nofun-ui-runtime`. */
 export function runtimeRoot(): string {
-  return (
-    process.env.NOFUN_UI_RUNTIME_ROOT ?? NodePath.join(NodePath.dirname(fileURLToPath(import.meta.url)), "..", "dist", "nofun-ui-runtime")
-  );
+  const override = process.env.NOFUN_UI_RUNTIME_ROOT?.trim();
+  if (override) return override;
+  const here = NodePath.dirname(fileURLToPath(import.meta.url));
+  const dev = NodePath.join(here, "..", "dist", "nofun-ui-runtime");
+  if (NodeFs.existsSync(dev)) return dev;
+  // The packaged tool-bundle entry runs one level deeper (src/live/) than this file (src/), so
+  // `../dist` lands in `src/dist`; fall back to the staged package-level `dist`.
+  return NodePath.join(here, "..", "..", "dist", "nofun-ui-runtime");
 }
 
 /** The pin for `version`, read from its runtime folder. Throws when the folder is not there. */

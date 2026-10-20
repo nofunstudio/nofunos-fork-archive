@@ -95,6 +95,23 @@ export async function prebuildNofunArtifactsRuntime(input: {
     NodePath.join(packageDir, "components.pin"),
     NodePath.join(input.outDir, "components.pin"),
   );
+  // emitToolBundle defaults to the pinned UI runtime and the packaged server never sets
+  // runtimeRoot, so stage it with the same relative layout the source package uses.
+  const runtimeSrcDir = NodePath.join(packageDir, "dist", "nofun-ui-runtime");
+  const pinHead =
+    NodeFs.readFileSync(NodePath.join(packageDir, "components.pin"), "utf8")
+      .trim()
+      .split(/\s+/)[0]
+      ?.toLowerCase() ?? "";
+  const pinnedRuntimeDir = NodePath.join(runtimeSrcDir, pinHead.slice(0, 12));
+  if (!pinHead || !NodeFs.lstatSync(pinnedRuntimeDir, { throwIfNoEntry: false })?.isDirectory()) {
+    throw new Error(
+      `no built runtime at ${pinnedRuntimeDir}; run \`pnpm runtime:build\` in packages/nofun-artifacts first.`,
+    );
+  }
+  NodeFs.cpSync(runtimeSrcDir, NodePath.join(input.outDir, "dist", "nofun-ui-runtime"), {
+    recursive: true,
+  });
   const shimPath = NodePath.join(input.outDir, "esbuild-shim.mjs");
   NodeFs.writeFileSync(shimPath, ESBUILD_SHIM);
 
