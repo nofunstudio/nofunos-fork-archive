@@ -2,6 +2,7 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Schema from "effect/Schema";
 
 import {
+  OrchestratorMcpCapabilitiesResult,
   OrchestratorMcpCreateThreadsInput,
   OrchestratorMcpDelegateTaskInput,
   OrchestratorMcpDelegateTaskResult,
@@ -12,6 +13,7 @@ import {
   OrchestratorMcpThreadWaitInput,
 } from "./orchestratorMcp.ts";
 
+const decodeCapabilitiesResult = Schema.decodeUnknownSync(OrchestratorMcpCapabilitiesResult);
 const decodeCreateThreadsInput = Schema.decodeUnknownSync(OrchestratorMcpCreateThreadsInput);
 const decodeDelegateTaskInput = Schema.decodeUnknownSync(OrchestratorMcpDelegateTaskInput);
 const decodeDelegateTaskResult = Schema.decodeUnknownSync(OrchestratorMcpDelegateTaskResult);
@@ -225,5 +227,39 @@ describe("orchestrator MCP contracts", () => {
         reason: "Loop converged.",
       }).reason,
     ).toBe("Loop converged.");
+  });
+
+  it("carries the server build identity in capabilities results", () => {
+    const base = {
+      parentThreadId: null,
+      inheritedProviderInstanceId: null,
+      inheritedModel: null,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      providers: [],
+      features: {
+        appOwnedSubagents: true,
+        asyncPolling: true,
+        cancellation: true,
+        batchThreadCreation: true,
+        threadManagement: true,
+        incrementalThreadRead: true,
+        scheduledTasks: true,
+        maxBatchThreads: 20,
+      },
+    } as const;
+    const withBuild = decodeCapabilitiesResult({
+      ...base,
+      serverBuild: { sha: "abc123", version: "0.0.45" },
+    });
+    expect(withBuild.serverBuild).toEqual({ sha: "abc123", version: "0.0.45" });
+    // Older servers send no build identity; new clients must still decode.
+    const legacy = decodeCapabilitiesResult({ ...base });
+    expect(legacy.serverBuild).toBeUndefined();
+    const unknown = decodeCapabilitiesResult({
+      ...base,
+      serverBuild: { sha: null, version: null },
+    });
+    expect(unknown.serverBuild).toEqual({ sha: null, version: null });
   });
 });

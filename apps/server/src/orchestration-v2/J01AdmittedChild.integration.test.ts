@@ -241,5 +241,5 @@ it.todo(
   "J01 gate 2: associate, accept and integrate an admitted public child result once (blocked: B-02d/public admission binding)",
 );
 it.todo(
-  "J01 gate 3: refuse an old server build (gap: admission binds runtime configuration, not server build/SHA identity)",
+  "J01 gate 3: refuse an old server build through the production facts seam (BK1b must wire MissionAdmissionFacts.readFacts to populate serverBuild via serverBuildFactsForAdmission(requiredServerBuild, resolveServerBuild()) with the canonical mission pin)",
 );
