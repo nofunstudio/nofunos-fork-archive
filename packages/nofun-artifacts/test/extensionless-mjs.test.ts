@@ -213,6 +213,51 @@ test("package.json browser:false mapping still disables the module", async () =>
   }
 });
 
+test("browser:false for the extensionless specifier still disables the module with no original file", async () => {
+  const { dir, index } = scratchDir();
+  try {
+    NodeFs.writeFileSync(
+      NodePath.join(dir, "package.json"),
+      `${JSON.stringify({ browser: { "./foo": false } })}\n`,
+    );
+    NodeFs.writeFileSync(NodePath.join(dir, "foo.mjs"), `export default "MJS";\n`);
+    NodeFs.writeFileSync(
+      NodePath.join(dir, "entry.ts"),
+      `import x from "./foo";\n(globalThis as any).__rv = x;\n`,
+    );
+    // No foo.ts (or any other native candidate) exists, yet base esbuild
+    // still applies the browser:false mapping and emits an empty disabled
+    // module. The fallback must step aside instead of bundling foo.mjs.
+    const built = await bundleEntry(dir, index, "entry.ts");
+    assert.doesNotMatch(built.js, /MJS/);
+  } finally {
+    NodeFs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("browser redirect for the extensionless specifier wins over a sibling .mjs file", async () => {
+  const { dir, index } = scratchDir();
+  try {
+    NodeFs.writeFileSync(
+      NodePath.join(dir, "package.json"),
+      `${JSON.stringify({ browser: { "./foo": "./bar.ts" } })}\n`,
+    );
+    NodeFs.writeFileSync(NodePath.join(dir, "foo.mjs"), `export default "MJS";\n`);
+    NodeFs.writeFileSync(NodePath.join(dir, "bar.ts"), `export default "BROWSER";\n`);
+    NodeFs.writeFileSync(
+      NodePath.join(dir, "entry.ts"),
+      `import x from "./foo";\n(globalThis as any).__rv = x;\n`,
+    );
+    // Base esbuild redirects ./foo to bar.ts via the mapping even though
+    // no file exists at the original path; the fallback must match that.
+    const built = await bundleEntry(dir, index, "entry.ts");
+    assert.match(built.js, /BROWSER/);
+    assert.doesNotMatch(built.js, /MJS/);
+  } finally {
+    NodeFs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("50 extensionless imports stay close to explicit-extension time", async () => {
   const { dir, index } = scratchDir();
   try {

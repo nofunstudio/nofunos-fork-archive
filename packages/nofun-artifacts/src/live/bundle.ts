@@ -108,13 +108,24 @@ function isFile(candidate: string): boolean {
 }
 
 /**
- * Probe the extra extensions under esbuild's authoritative resolve dir.
- * Returns undefined when no fallback file exists.
+ * Marker protecting the fallback path's own `build.resolve` probes from
+ * re-entering the fallback: marker-tagged resolves skip straight to native
+ * handling, so the probes observe exactly what esbuild would do.
  */
-function probeFallbackExtensions(resolveDir: string, spec: string): string | undefined {
+const FALLBACK_RESOLVE_MARKER = "nofunExtensionlessFallback";
+
+/**
+ * Probe the extra extensions under esbuild's authoritative resolve dir.
+ * Returns the fallback specifier and absolute path when a fallback file
+ * exists, and undefined otherwise.
+ */
+function probeFallbackExtensions(
+  resolveDir: string,
+  spec: string,
+): { spec: string; path: string } | undefined {
   for (const ext of FALLBACK_PROBES) {
     const candidate = NodePath.resolve(resolveDir, `${spec}${ext}`);
-    if (isFile(candidate)) return candidate;
+    if (isFile(candidate)) return { spec: `${spec}${ext}`, path: candidate };
   }
   return undefined;
 }
@@ -332,12 +343,49 @@ export async function bundle(
         // normally — preserving browser-field mappings, plugin
         // namespaces, resolution order, and every other native behavior.
         // Only when none exists, and a sibling `.mjs`/`.cjs` file does,
-        // return that previously-unresolvable target. No `build.resolve`
-        // round trip, so ordinary imports pay only cached stat calls.
+        // select that previously-unresolvable target as below. No
+        // `build.resolve` round trip on this fast path, so ordinary
+        // imports pay only cached stat calls.
         if (!isBare(path) && fallbackEligible(args)) {
+          if (args.pluginData?.[FALLBACK_RESOLVE_MARKER]) return undefined;
           if (nativeTargetExists(args.resolveDir, path)) return undefined;
           const probed = probeFallbackExtensions(args.resolveDir, path);
-          if (probed) return { path: probed };
+          if (!probed) return undefined;
+          // A package.json `browser` mapping can resolve the original
+          // extensionless specifier even though no file exists at the
+          // original path (`{"./foo": false}` disables the module,
+          // `{"./foo": "./bar.ts"}` redirects it). The stat check above
+          // cannot see mappings, so ask esbuild about the original
+          // specifier first; when it resolves, step aside (undefined) so
+          // native handling applies the mapping untouched. Only when even
+          // esbuild cannot resolve the original is the fallback selected —
+          // resolved through esbuild so mappings keyed at the fallback
+          // path itself still apply. These round trips run solely on this
+          // rare path (no native target AND a fallback file exists).
+          const markerData = { [FALLBACK_RESOLVE_MARKER]: true };
+          const native = await build.resolve(path, {
+            resolveDir: args.resolveDir,
+            kind: args.kind,
+            importer: args.importer,
+            pluginData: markerData,
+            with: args.with,
+          });
+          if (native.errors.length === 0) return undefined;
+          const fallback = await build.resolve(probed.spec, {
+            resolveDir: args.resolveDir,
+            kind: args.kind,
+            importer: args.importer,
+            pluginData: markerData,
+            with: args.with,
+          });
+          if (fallback.errors.length > 0 || !cachedIsFile(fallback.path)) return undefined;
+          return {
+            path: fallback.path,
+            namespace: fallback.namespace,
+            external: fallback.external,
+            sideEffects: fallback.sideEffects,
+            suffix: fallback.suffix,
+          };
         }
         return undefined;
       });
