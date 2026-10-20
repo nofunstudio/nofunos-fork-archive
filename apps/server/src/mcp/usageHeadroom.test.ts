@@ -422,6 +422,70 @@ describe("usageHeadroom", () => {
         }),
         okWhenYoung: false,
       },
+      {
+        name: "multiple weekly rows one missing resetsAt (R4)",
+        build: (age) => ({
+          checkedAt: at(-age),
+          windows: [
+            healthySession(240),
+            healthyWeekly(6 * 24 * 60),
+            { ...healthyWeekly(undefined), id: "weekly-second" },
+          ],
+        }),
+        okWhenYoung: false,
+      },
+      {
+        name: "multiple weekly rows one garbage resetsAt (R4)",
+        build: (age) => ({
+          checkedAt: at(-age),
+          windows: [
+            healthySession(240),
+            healthyWeekly(6 * 24 * 60),
+            { ...healthyWeekly(6 * 24 * 60), id: "weekly-second", resetsAt: "garbage" },
+          ],
+        }),
+        okWhenYoung: false,
+      },
+      {
+        name: "multiple weekly rows tightest bound wins (R4)",
+        build: (age) => ({
+          checkedAt: at(-age),
+          windows: [
+            healthySession(240),
+            healthyWeekly(6 * 24 * 60),
+            { ...healthyWeekly(-8 * 24 * 60), id: "weekly-second" },
+          ],
+        }),
+        okWhenYoung: false,
+      },
+      {
+        name: "duplicate valid weekly rows (R4)",
+        build: (age) => ({
+          checkedAt: at(-age),
+          windows: [
+            healthySession(240),
+            healthyWeekly(6 * 24 * 60),
+            { ...healthyWeekly(6 * 24 * 60), id: "weekly-second" },
+          ],
+        }),
+        okWhenYoung: true,
+      },
+      {
+        name: "weekly reset exactly at the 7d bound (R4)",
+        build: (age) => ({
+          checkedAt: at(-age),
+          windows: [healthySession(240), healthyWeekly(-7 * 24 * 60)],
+        }),
+        okWhenYoung: true,
+      },
+      {
+        name: "weekly reset just past the 7d bound (R4)",
+        build: (age) => ({
+          checkedAt: at(-age),
+          windows: [healthySession(240), healthyWeekly(-7 * 24 * 60 - 1)],
+        }),
+        okWhenYoung: false,
+      },
     ];
     for (const age of AGES) {
       for (const variant of variants) {

@@ -481,6 +481,76 @@ describe("MissionAdmission", () => {
         okWhenYoung: false,
       },
       {
+        name: "multiple weekly rows one missing resetsAt (R4)",
+        build: (ageMs) => ({
+          checkedAt: iso(NOW_MS - ageMs),
+          windows: [
+            session(iso(NOW_MS + 240 * 60_000)),
+            weekly(10, validWeeklyReset),
+            { ...weekly(10, undefined), id: "weekly-second" },
+          ],
+        }),
+        okWhenYoung: false,
+      },
+      {
+        name: "multiple weekly rows one garbage resetsAt (R4)",
+        build: (ageMs) => ({
+          checkedAt: iso(NOW_MS - ageMs),
+          windows: [
+            session(iso(NOW_MS + 240 * 60_000)),
+            weekly(10, validWeeklyReset),
+            { ...weekly(10, validWeeklyReset), id: "weekly-second", resetsAt: "garbage" },
+          ],
+        }),
+        okWhenYoung: false,
+      },
+      {
+        name: "multiple weekly rows tightest bound wins (R4)",
+        build: (ageMs) => ({
+          checkedAt: iso(NOW_MS - ageMs),
+          windows: [
+            session(iso(NOW_MS + 240 * 60_000)),
+            weekly(10, validWeeklyReset),
+            { ...weekly(10, expiredWeeklyReset), id: "weekly-second" },
+          ],
+        }),
+        okWhenYoung: false,
+      },
+      {
+        name: "duplicate valid weekly rows (R4)",
+        build: (ageMs) => ({
+          checkedAt: iso(NOW_MS - ageMs),
+          windows: [
+            session(iso(NOW_MS + 240 * 60_000)),
+            weekly(10, validWeeklyReset),
+            { ...weekly(10, validWeeklyReset), id: "weekly-second" },
+          ],
+        }),
+        okWhenYoung: true,
+      },
+      {
+        name: "weekly reset exactly at the 7d bound (R4)",
+        build: (ageMs) => ({
+          checkedAt: iso(NOW_MS - ageMs),
+          windows: [
+            session(iso(NOW_MS + 240 * 60_000)),
+            weekly(10, iso(NOW_MS - 7 * 24 * 60 * 60_000)),
+          ],
+        }),
+        okWhenYoung: true,
+      },
+      {
+        name: "weekly reset just past the 7d bound (R4)",
+        build: (ageMs) => ({
+          checkedAt: iso(NOW_MS - ageMs),
+          windows: [
+            session(iso(NOW_MS + 240 * 60_000)),
+            weekly(10, iso(NOW_MS - 7 * 24 * 60 * 60_000 - 60_000)),
+          ],
+        }),
+        okWhenYoung: false,
+      },
+      {
         name: "missing session resetsAt",
         build: (ageMs) => ({
           checkedAt: iso(NOW_MS - ageMs),
