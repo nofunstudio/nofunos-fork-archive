@@ -62,6 +62,135 @@ test("extensionless relative import resolves a sibling .mjs file", async () => {
   }
 });
 
+/**
+ * Minimal scratch dir for resolver-order tests: plain files plus a
+ * node_modules link, with an empty component index since entries import
+ * absolute file paths directly (the same shape as the review repros).
+ */
+function scratchDir(): { dir: string; index: LiveIndex } {
+  const dir = NodeFs.mkdtempSync(NodePath.join(NodeOs.tmpdir(), "nf-ext-order-"));
+  NodeFs.symlinkSync(
+    NodePath.join(process.cwd(), "node_modules"),
+    NodePath.join(dir, "node_modules"),
+  );
+  const index = {
+    dir,
+    stamp: "test",
+    entries: [],
+    byName: new Map(),
+    files: new Map(),
+    brands: [],
+  } as unknown as LiveIndex;
+  return { dir, index };
+}
+
+async function bundleEntry(dir: string, index: LiveIndex, name: string) {
+  return bundle(dir, index, {
+    entry: `import ${JSON.stringify(NodePath.join(dir, name))};\n`,
+    minify: false,
+  });
+}
+
+test("directory index still wins over a sibling .mjs file", async () => {
+  const { dir, index } = scratchDir();
+  try {
+    NodeFs.mkdirSync(NodePath.join(dir, "foo"), { recursive: true });
+    NodeFs.writeFileSync(NodePath.join(dir, "foo", "index.ts"), `export default "INDEX";\n`);
+    NodeFs.writeFileSync(NodePath.join(dir, "foo.mjs"), `export default "MJS";\n`);
+    NodeFs.writeFileSync(
+      NodePath.join(dir, "entry.ts"),
+      `import x from "./foo";\n(globalThis as any).__rv = x;\n`,
+    );
+    const built = await bundleEntry(dir, index, "entry.ts");
+    assert.match(built.js, /INDEX/);
+    assert.doesNotMatch(built.js, /MJS/);
+  } finally {
+    NodeFs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("trailing-slash directory import still resolves the index", async () => {
+  const { dir, index } = scratchDir();
+  try {
+    NodeFs.mkdirSync(NodePath.join(dir, "foo"), { recursive: true });
+    NodeFs.writeFileSync(NodePath.join(dir, "foo", "index.ts"), `export default "INDEX";\n`);
+    NodeFs.writeFileSync(NodePath.join(dir, "foo", ".ts"), `export default "HIDDEN";\n`);
+    NodeFs.writeFileSync(
+      NodePath.join(dir, "entry.ts"),
+      `import x from "./foo/";\n(globalThis as any).__rv = x;\n`,
+    );
+    const built = await bundleEntry(dir, index, "entry.ts");
+    assert.match(built.js, /INDEX/);
+    assert.doesNotMatch(built.js, /HIDDEN/);
+  } finally {
+    NodeFs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("exact extensionless file still wins over a sibling .ts file", async () => {
+  const { dir, index } = scratchDir();
+  try {
+    NodeFs.writeFileSync(NodePath.join(dir, "foo"), `export default "EXACT";\n`);
+    NodeFs.writeFileSync(NodePath.join(dir, "foo.ts"), `export default "TS";\n`);
+    NodeFs.writeFileSync(
+      NodePath.join(dir, "entry.ts"),
+      `import x from "./foo";\n(globalThis as any).__rv = x;\n`,
+    );
+    const built = await bundleEntry(dir, index, "entry.ts");
+    assert.match(built.js, /EXACT/);
+    assert.doesNotMatch(built.js, /"TS"/);
+  } finally {
+    NodeFs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("side-effect import still resolves the .css target", async () => {
+  const { dir, index } = scratchDir();
+  try {
+    NodeFs.writeFileSync(NodePath.join(dir, "foo.css"), `.foo { color: red; }\n`);
+    NodeFs.writeFileSync(NodePath.join(dir, "foo.json"), `{"a": 1}\n`);
+    NodeFs.writeFileSync(NodePath.join(dir, "entry.ts"), `import "./foo";\n`);
+    const built = await bundleEntry(dir, index, "entry.ts");
+    assert.deepEqual(built.cssImports, [NodeFs.realpathSync(NodePath.join(dir, "foo.css"))]);
+  } finally {
+    NodeFs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("symlinked .ts candidate still wins over a sibling .mjs file", async () => {
+  const { dir, index } = scratchDir();
+  try {
+    NodeFs.writeFileSync(NodePath.join(dir, "target.ts"), `export default "TS";\n`);
+    NodeFs.symlinkSync(NodePath.join(dir, "target.ts"), NodePath.join(dir, "foo.ts"));
+    NodeFs.writeFileSync(NodePath.join(dir, "foo.mjs"), `export default "MJS";\n`);
+    NodeFs.writeFileSync(
+      NodePath.join(dir, "entry.ts"),
+      `import x from "./foo";\n(globalThis as any).__rv = x;\n`,
+    );
+    const built = await bundleEntry(dir, index, "entry.ts");
+    assert.match(built.js, /"TS"/);
+    assert.doesNotMatch(built.js, /"MJS"/);
+  } finally {
+    NodeFs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("symlinked .mjs-only target resolves through the fallback", async () => {
+  const { dir, index } = scratchDir();
+  try {
+    NodeFs.writeFileSync(NodePath.join(dir, "target.mjs"), `export default "LINKED-MJS";\n`);
+    NodeFs.symlinkSync(NodePath.join(dir, "target.mjs"), NodePath.join(dir, "foo.mjs"));
+    NodeFs.writeFileSync(
+      NodePath.join(dir, "entry.ts"),
+      `import x from "./foo";\n(globalThis as any).__rv = x;\n`,
+    );
+    const built = await bundleEntry(dir, index, "entry.ts");
+    assert.match(built.js, /LINKED-MJS/);
+  } finally {
+    NodeFs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("extensionless relative import still prefers the builder's existing targets", async () => {
   const { dir, index } = fixtureDir();
   try {

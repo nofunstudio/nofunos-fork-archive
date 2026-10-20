@@ -64,32 +64,65 @@ const NEXT_SHIMS: Record<string, string> = {
 };
 
 /**
- * Probe order for extensionless relative imports (`./model` beside
- * `model.mjs`). esbuild's default resolver tries tsx/ts/jsx/js/json and never
- * `.mjs`; `.mjs` trails the list so every specifier that resolves today keeps
- * its existing target and only previously-unresolvable `.mjs` files start
- * resolving.
+ * Extra extensions probed only after esbuild's own resolution fails.
+ * esbuild never tries `.mjs`/`.cjs` for extensionless relative imports
+ * (chat-list's `./experiment-mrch-model`), so only these previously
+ * unresolvable targets are probed — everything that resolves today keeps
+ * its existing target byte-for-byte.
  */
-const EXTENSIONLESS_PROBES = [".tsx", ".ts", ".jsx", ".js", ".json", ".mjs"] as const;
+const FALLBACK_PROBES = [".mjs", ".cjs"] as const;
 
 /**
- * Resolve an extensionless relative specifier (`./x`, `../x`) to a sibling
- * file the builder supports. Returns undefined when the specifier already has
- * an extension or no probed file exists, so the default resolver keeps
- * handling everything else byte-for-byte as before.
+ * Marker keeping the normal-resolution probe below from re-entering itself:
+ * the inner `build.resolve` carries it in `pluginData`, and guarded calls
+ * return undefined so esbuild's default resolver answers them directly.
  */
-function probeExtensionlessRelative(args: esbuild.OnResolveArgs): string | undefined {
-  const base = args.path.split("/").pop() ?? "";
-  if (base.includes(".")) return undefined;
-  const fromDir =
-    args.importer && NodePath.isAbsolute(args.importer)
-      ? NodePath.dirname(args.importer)
-      : args.resolveDir;
-  for (const ext of EXTENSIONLESS_PROBES) {
-    const candidate = NodePath.resolve(fromDir, `${args.path}${ext}`);
-    if (NodeFs.lstatSync(candidate, { throwIfNoEntry: false })?.isFile() === true) {
-      return candidate;
-    }
+const FALLBACK_GUARD = "nofun-live-fallback-inner";
+
+interface FallbackPluginData {
+  [FALLBACK_GUARD]?: boolean;
+}
+
+/**
+ * Whether a specifier may gain a new fallback target. Only extensionless
+ * relative file imports (`./x`, `../x`) qualify: absolute paths, directory
+ * imports with a trailing slash, specifiers that already carry an extension,
+ * non-file namespaces, and the inner normal-resolution probe itself keep
+ * esbuild's default behavior untouched.
+ */
+function fallbackEligible(args: esbuild.OnResolveArgs): boolean {
+  if (args.namespace !== "file") return false;
+  if ((args.pluginData as FallbackPluginData | undefined)?.[FALLBACK_GUARD] === true) {
+    return false;
+  }
+  const spec = args.path;
+  if (!spec.startsWith("./") && !spec.startsWith("../")) return false;
+  if (spec.endsWith("/")) return false;
+  const base = spec.split("/").pop() ?? "";
+  if (base.includes(".")) return false;
+  return true;
+}
+
+/**
+ * Regular-file check that follows symlinks. Missing paths, broken links,
+ * and unreadable entries are not files.
+ */
+function isFile(candidate: string): boolean {
+  try {
+    return NodeFs.statSync(candidate).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Probe the extra extensions under esbuild's authoritative resolve dir.
+ * Returns undefined when no fallback file exists.
+ */
+function probeFallbackExtensions(resolveDir: string, spec: string): string | undefined {
+  for (const ext of FALLBACK_PROBES) {
+    const candidate = NodePath.resolve(resolveDir, `${spec}${ext}`);
+    if (isFile(candidate)) return candidate;
   }
   return undefined;
 }
@@ -270,11 +303,25 @@ export async function bundle(
           return resolved.errors.length > 0 ? { errors: resolved.errors } : { path: resolved.path };
         }
         // Extensionless relative imports reach esbuild's default resolver,
-        // which never tries `.mjs` (chat-list's `./experiment-mrch-model`).
-        // Probe the builder's supported extensions first; anything already
-        // resolving keeps its target because `.mjs` trails esbuild's order.
-        if (!isBare(path)) {
-          const probed = probeExtensionlessRelative(args);
+        // which never tries `.mjs`/`.cjs` (chat-list's
+        // `./experiment-mrch-model`). Run the normal resolution first so
+        // exact files, directory indexes, and CSS targets keep their
+        // existing winners; only probe the extra extensions when normal
+        // resolution fails. The inner resolve carries the fallback guard in
+        // `pluginData` so it does not re-enter this branch.
+        if (!isBare(path) && fallbackEligible(args)) {
+          const normal = await build.resolve(path, {
+            importer: args.importer,
+            namespace: args.namespace,
+            resolveDir: args.resolveDir,
+            kind: args.kind,
+            pluginData: {
+              ...(args.pluginData as FallbackPluginData | undefined),
+              [FALLBACK_GUARD]: true,
+            },
+          });
+          if (normal.errors.length === 0) return { path: normal.path };
+          const probed = probeFallbackExtensions(args.resolveDir, path);
           if (probed) return { path: probed };
         }
         return undefined;
