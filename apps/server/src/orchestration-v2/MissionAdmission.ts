@@ -189,6 +189,13 @@ export interface MissionAdmissionFacts {
   readonly route: MissionAdmissionRouteFacts;
   readonly usageLimits: ServerProviderUsageLimits | undefined;
   readonly usageMaxObservationAgeMs: number;
+  /**
+   * Which reader supplied `usageLimits`. Passive-only Muse observations go
+   * stale by the clock while idle, so a Muse source trusts the last
+   * observation while its window has not reset instead of refusing unknown.
+   * Absent means a regular provider source (strict clock rule).
+   */
+  readonly usageSource?: "provider" | "muse" | "unavailable" | undefined;
   /** Optional bounded fact age; unsafe values fall back to safe constant. */
   readonly maxFactAgeMs?: number | undefined;
   readonly unknownUsageException?: MissionAdmissionUnknownUsageException | undefined;
@@ -585,6 +592,7 @@ export const decideMissionAdmission = (
   const usage = usageHeadroom(facts.usageLimits, facts.nowMs, {
     model: request.modelId,
     maxObservationAgeMs: facts.usageMaxObservationAgeMs,
+    trustUnresetWindow: facts.usageSource === "muse",
   });
   let exceptionConsumptionRef: string | null = null;
   let exceptionId: string | null = null;

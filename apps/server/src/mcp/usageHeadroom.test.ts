@@ -174,4 +174,69 @@ describe("usageHeadroom", () => {
       ),
     ).toEqual({ headroom: "unknown", summary: "usage not reported" });
   });
+
+  it("trusts a 45-minute-old passive observation while its 5h window has not reset", () => {
+    const result = usageHeadroom(
+      {
+        checkedAt: at(-45),
+        windows: [window("session", 40, 240), window("weekly", 10, 900)],
+      },
+      NOW,
+      { trustUnresetWindow: true },
+    );
+    expect(result.headroom).toBe("ok");
+    expect(result.summary).toContain("5h 60% left");
+    expect(result.summary).toContain("observed 45m ago");
+  });
+
+  it("keeps a stale passive observation admissible after its window reset, from the weekly value", () => {
+    const result = usageHeadroom(
+      {
+        checkedAt: at(-120),
+        windows: [window("session", 40, -30), window("weekly", 10, 900)],
+      },
+      NOW,
+      { trustUnresetWindow: true },
+    );
+    expect(result.headroom).toBe("ok");
+    expect(result.summary).toContain("weekly 90% left");
+  });
+
+  it("reports a bounded stale-but-likely-fresh headroom when every window reset", () => {
+    const result = usageHeadroom(
+      {
+        checkedAt: at(-400),
+        windows: [window("session", 40, -30)],
+      },
+      NOW,
+      { trustUnresetWindow: true },
+    );
+    expect(result.headroom).toBe("ok");
+    expect(result.summary).toContain("likely fresh");
+  });
+
+  it("still reports low and exhausted from a stale passive observation", () => {
+    const staleLow = {
+      checkedAt: at(-45),
+      windows: [window("session", 90, 240), window("weekly", 10, 900)],
+    };
+    expect(usageHeadroom(staleLow, NOW, { trustUnresetWindow: true }).headroom).toBe("low");
+    const staleSpent = {
+      checkedAt: at(-120),
+      windows: [window("session", 100, -30), window("weekly", 10, 900)],
+    };
+    expect(usageHeadroom(staleSpent, NOW, { trustUnresetWindow: true }).headroom).toBe("exhausted");
+  });
+
+  it("stays strict without the passive opt-in", () => {
+    expect(
+      usageHeadroom(
+        {
+          checkedAt: at(-45),
+          windows: [window("session", 40, 240), window("weekly", 10, 900)],
+        },
+        NOW,
+      ).headroom,
+    ).toBe("unknown");
+  });
 });

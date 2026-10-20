@@ -76,7 +76,8 @@ if (!PROFILES.some((profile) => profile.value === defaultProfile)) {
   process.exit(2);
 }
 const accountsPath =
-  flag("--accounts") ?? NodePath.join(NodeOS.homedir(), ".nofun-t3", "muse-accounts.json");
+  (flag("--accounts") ?? process.env.NOFUN_MUSE_ACCOUNTS?.trim()) ||
+  NodePath.join(NodeOS.homedir(), ".nofun-t3", "muse-accounts.json");
 const expandHome = (value) =>
   value === "~" || value?.startsWith("~/")
     ? NodePath.join(NodeOS.homedir(), value.slice(2))

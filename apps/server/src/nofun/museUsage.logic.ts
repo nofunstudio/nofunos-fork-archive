@@ -71,8 +71,9 @@ export function museChildEnvironment(
 }
 
 /**
- * `~/.nofun-t3/muse-accounts.json`. Only the server whose persona matches
- * `persona` reads usage, so one Muse login is probed by one environment.
+ * `muse-accounts.json` in the T3 home actually in use. Only the server
+ * whose persona matches `persona` reads usage, so one Muse login is
+ * probed by one environment.
  */
 export const MuseAccountsFile = Schema.Struct({
   persona: Schema.String,

@@ -254,6 +254,58 @@ describe("MissionAdmission", () => {
       "usage_exhausted",
     );
   });
+  const museStaleFixture = (
+    usedPercent: number,
+    sessionResetMs: number,
+    checkedAtMs: number,
+  ): ServerProviderUsageLimits => ({
+    checkedAt: iso(checkedAtMs),
+    windows: [
+      {
+        id: "five_hour",
+        kind: "session",
+        label: "5h",
+        usedPercent,
+        resetsAt: iso(sessionResetMs),
+      },
+      {
+        id: "weekly",
+        kind: "weekly",
+        label: "weekly",
+        usedPercent: 10,
+        resetsAt: iso(NOW_MS + 6 * 24 * 60_000),
+      },
+    ],
+  });
+
+  it("admits a stale Muse observation while its 5h window has not reset", () => {
+    const out = successOf(requestFixture(), {
+      ...factsFixture(),
+      usageSource: "muse",
+      usageLimits: museStaleFixture(40, NOW_MS + 240 * 60_000, NOW_MS - 45 * 60_000),
+    });
+    assert.isTrue(out.dispatchAuthorized);
+  });
+
+  it("still refuses low and exhausted Muse observations past the clock budget", () => {
+    assert.strictEqual(
+      codeOf(requestFixture(), {
+        ...factsFixture(),
+        usageSource: "muse",
+        usageLimits: museStaleFixture(90, NOW_MS + 240 * 60_000, NOW_MS - 45 * 60_000),
+      }),
+      "usage_low",
+    );
+    assert.strictEqual(
+      codeOf(requestFixture(), {
+        ...factsFixture(),
+        usageSource: "muse",
+        usageLimits: museStaleFixture(100, NOW_MS - 30 * 60_000, NOW_MS - 120 * 60_000),
+      }),
+      "usage_exhausted",
+    );
+  });
+
   it("denies stale and future usage as unknown", () => {
     assert.strictEqual(
       codeOf(requestFixture(), {

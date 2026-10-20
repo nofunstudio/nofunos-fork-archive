@@ -22,6 +22,18 @@ export interface UsageHeadroomOptions {
   readonly model?: string;
   /** Admission may use a stricter observation budget; this never refreshes usage. */
   readonly maxObservationAgeMs?: number | undefined;
+  /**
+   * Passive-only sources (Muse) record observations only during useful work,
+   * so an idle account goes stale by the clock while its quota window has
+   * not reset. When true, an observation older than `maxObservationAgeMs`
+   * is still classified from its observed numbers while no gating window
+   * has reset since the observation; after a reset it reports a bounded
+   * stale-but-likely-fresh headroom (from the weekly window when that one
+   * has not reset) instead of unknown. Observed low/exhausted numbers stay
+   * low/exhausted either way. Default false: every other source keeps the
+   * pessimistic clock rule. This never refreshes usage.
+   */
+  readonly trustUnresetWindow?: boolean | undefined;
 }
 
 /** Below this share left, a window is worth preserving. */
@@ -75,6 +87,7 @@ function gatingWindows(
   model: string | undefined,
   nowMs: number,
   maxAge?: number,
+  trustUnresetWindow?: boolean,
 ) {
   let windows = limits.windows.filter(
     (window) =>
@@ -98,7 +111,7 @@ function gatingWindows(
   const verdict = usageHeadroom(
     { ...limits, windows: primary.map(({ routingPool: _pool, ...row }) => row) },
     nowMs,
-    { maxObservationAgeMs: maxAge },
+    { maxObservationAgeMs: maxAge, trustUnresetWindow },
   );
   // Grok/Composer consume Cursor Models first, then Other Models. A low or
   // unknown primary cannot become healthy just because the fallback has room.
@@ -110,58 +123,14 @@ function gatingWindows(
   ];
 }
 
-export function usageHeadroom(
-  limits: ServerProviderUsageLimits | undefined,
+/**
+ * Classify already-validated gating windows from their observed numbers.
+ * Shared by the strict path and the passive lenient path below.
+ */
+function classifyWindows(
+  windows: ReadonlyArray<ServerProviderUsageWindow>,
   nowMs: number,
-  options?: UsageHeadroomOptions,
 ): { readonly headroom: UsageHeadroom; readonly summary: string } {
-  const model = options?.model;
-  const fresh = limits && !limits.unavailable ? limits : undefined;
-  if (!fresh) return { headroom: "unknown", summary: "usage not reported" };
-  const checkedMs = Date.parse(fresh.checkedAt);
-  const maxAge = options?.maxObservationAgeMs ?? 30 * 60_000;
-  if (
-    !Number.isFinite(checkedMs) ||
-    checkedMs > nowMs ||
-    !Number.isFinite(maxAge) ||
-    maxAge < 0 ||
-    nowMs - checkedMs > maxAge
-  ) {
-    return { headroom: "unknown", summary: "usage observation is stale or unavailable" };
-  }
-  const windows = gatingWindows(fresh, model, nowMs, maxAge);
-  if (windows.length === 0) {
-    if (fresh.windows.length > 0) {
-      return { headroom: "unknown", summary: `no usage windows apply to ${model}` };
-    }
-    return { headroom: "unknown", summary: "usage not reported" };
-  }
-  if (
-    windows.some(
-      (window) =>
-        !Number.isFinite(window.usedPercent) ||
-        window.usedPercent < 0 ||
-        window.usedPercent > 100 ||
-        (window.resetsAt !== undefined && !Number.isFinite(Date.parse(window.resetsAt))),
-    )
-  ) {
-    return { headroom: "unknown", summary: "usage window is malformed" };
-  }
-  // A reset that passed since the last observation leaves stale numbers: the
-  // window may have replenished, or the provider may not have reset it. Read
-  // that as stale, never as headroom.
-  const stale = windows.some((window) => {
-    if (!window.resetsAt) return false;
-    const resetMs = Date.parse(window.resetsAt);
-    return (
-      Number.isFinite(resetMs) &&
-      resetMs <= nowMs &&
-      !(Number.isFinite(checkedMs) && checkedMs > resetMs)
-    );
-  });
-  if (stale) {
-    return { headroom: "unknown", summary: "usage stale (a window reset since the last check)" };
-  }
   let headroom: UsageHeadroom = "ok";
   const parts = windows.map((window) => {
     // Classify on the exact share: 99.6% used is low with ~0% displayed,
@@ -184,6 +153,110 @@ export function usageHeadroom(
   return { headroom, summary: parts.join(" · ") };
 }
 
+/** True when a window reset passed since the observation without a newer read. */
+function resetSinceObservation(
+  windows: ReadonlyArray<ServerProviderUsageWindow>,
+  checkedMs: number,
+  nowMs: number,
+): boolean {
+  return windows.some((window) => {
+    if (!window.resetsAt) return false;
+    const resetMs = Date.parse(window.resetsAt);
+    return (
+      Number.isFinite(resetMs) &&
+      resetMs <= nowMs &&
+      !(Number.isFinite(checkedMs) && checkedMs > resetMs)
+    );
+  });
+}
+
+export function usageHeadroom(
+  limits: ServerProviderUsageLimits | undefined,
+  nowMs: number,
+  options?: UsageHeadroomOptions,
+): { readonly headroom: UsageHeadroom; readonly summary: string } {
+  const model = options?.model;
+  const trustUnresetWindow = options?.trustUnresetWindow ?? false;
+  const fresh = limits && !limits.unavailable ? limits : undefined;
+  if (!fresh) return { headroom: "unknown", summary: "usage not reported" };
+  const checkedMs = Date.parse(fresh.checkedAt);
+  const maxAge = options?.maxObservationAgeMs ?? 30 * 60_000;
+  if (!Number.isFinite(checkedMs) || checkedMs > nowMs || !Number.isFinite(maxAge) || maxAge < 0) {
+    return { headroom: "unknown", summary: "usage observation is stale or unavailable" };
+  }
+  const overAge = nowMs - checkedMs > maxAge;
+  const windows = gatingWindows(fresh, model, nowMs, maxAge, trustUnresetWindow);
+  if (windows.length === 0) {
+    if (fresh.windows.length > 0) {
+      return { headroom: "unknown", summary: `no usage windows apply to ${model}` };
+    }
+    return { headroom: "unknown", summary: "usage not reported" };
+  }
+  if (
+    windows.some(
+      (window) =>
+        !Number.isFinite(window.usedPercent) ||
+        window.usedPercent < 0 ||
+        window.usedPercent > 100 ||
+        (window.resetsAt !== undefined && !Number.isFinite(Date.parse(window.resetsAt))),
+    )
+  ) {
+    return { headroom: "unknown", summary: "usage window is malformed" };
+  }
+  // A reset that passed since the last observation leaves stale numbers: the
+  // window may have replenished, or the provider may not have reset it. Read
+  // that as stale, never as headroom.
+  const stale = resetSinceObservation(windows, checkedMs, nowMs);
+  if (!trustUnresetWindow) {
+    if (overAge) {
+      return { headroom: "unknown", summary: "usage observation is stale or unavailable" };
+    }
+    if (stale) {
+      return { headroom: "unknown", summary: "usage stale (a window reset since the last check)" };
+    }
+    return classifyWindows(windows, nowMs);
+  }
+  return stalePassiveHeadroom(windows, checkedMs, nowMs);
+}
+
+/**
+ * Passive-only verdict for an observation past its clock budget. Observed
+ * low/exhausted numbers stay low/exhausted: a reset may not have
+ * replenished them. Healthy numbers are trusted while no gating window has
+ * reset since the observation; after a reset the verdict falls back to the
+ * windows that have not reset (the weekly quota), and only when every
+ * window reset does it report a bounded stale-but-likely-fresh ok.
+ */
+function stalePassiveHeadroom(
+  windows: ReadonlyArray<ServerProviderUsageWindow>,
+  checkedMs: number,
+  nowMs: number,
+): { readonly headroom: UsageHeadroom; readonly summary: string } {
+  const ageNote = `(observed ${formatIn(nowMs - checkedMs)} ago)`;
+  const observed = classifyWindows(windows, nowMs);
+  if (observed.headroom === "low" || observed.headroom === "exhausted") {
+    return { headroom: observed.headroom, summary: `${observed.summary} ${ageNote}` };
+  }
+  if (!resetSinceObservation(windows, checkedMs, nowMs)) {
+    return { headroom: "ok", summary: `${observed.summary} ${ageNote}` };
+  }
+  const unreset = windows.filter((window) => !resetSinceObservation([window], checkedMs, nowMs));
+  if (unreset.length > 0) {
+    const fallback = classifyWindows(unreset, nowMs);
+    if (fallback.headroom === "low" || fallback.headroom === "exhausted") {
+      return { headroom: fallback.headroom, summary: `${fallback.summary} ${ageNote}` };
+    }
+    return {
+      headroom: "ok",
+      summary: `${fallback.summary} (stale observation; a window reset since the last check) ${ageNote}`,
+    };
+  }
+  return {
+    headroom: "ok",
+    summary: `usage stale but likely fresh ${ageNote}`,
+  };
+}
+
 /** A passive read of the real windows, with their original successful timestamp. */
 export function usageHeadroomObservation(
   limits: ServerProviderUsageLimits | undefined,
@@ -196,7 +269,13 @@ export function usageHeadroomObservation(
     observedAt: Number.isFinite(observed) ? limits!.checkedAt : null,
     ageMs: Number.isFinite(observed) && observed <= nowMs ? nowMs - observed : null,
     windows: limits
-      ? gatingWindows(limits, options?.model, nowMs, options?.maxObservationAgeMs)
+      ? gatingWindows(
+          limits,
+          options?.model,
+          nowMs,
+          options?.maxObservationAgeMs,
+          options?.trustUnresetWindow,
+        )
       : [],
     readCost: "passive" as const,
   };

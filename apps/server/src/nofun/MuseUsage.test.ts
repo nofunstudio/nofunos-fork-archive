@@ -102,9 +102,14 @@ const makeMemoryFileSystem = (
   });
 };
 
-const layerTest = (files: Map<string, string>, calls: Array<FsCall>, control?: FsControl) =>
+const layerTest = (
+  files: Map<string, string>,
+  calls: Array<FsCall>,
+  control?: FsControl,
+  baseDir = "/mem/test",
+) =>
   MuseUsage.layer.pipe(
-    Layer.provideMerge(ServerConfig.layerTest("/mem/cwd", "/mem/test")),
+    Layer.provideMerge(ServerConfig.layerTest("/mem/cwd", baseDir)),
     Layer.provideMerge(NodePath.layer),
     Layer.provideMerge(makeMemoryFileSystem(files, calls, control)),
   );
@@ -148,11 +153,12 @@ const withService = (
   calls: Array<FsCall>,
   run: (service: MuseUsage.MuseUsage["Service"]) => Effect.Effect<void>,
   control?: FsControl,
+  baseDir?: string,
 ) =>
   Effect.gen(function* () {
     const service = yield* MuseUsage.MuseUsage;
     yield* run(service);
-  }).pipe(Effect.scoped, Effect.provide(layerTest(files, calls, control)));
+  }).pipe(Effect.scoped, Effect.provide(layerTest(files, calls, control, baseDir)));
 
 describe("MuseUsage passive observations", () => {
   it.effect("starts with no readings and creates no probe state", () =>
@@ -552,6 +558,54 @@ describe("MuseUsage passive observations", () => {
         );
       } finally {
         restoreEnv();
+      }
+    }),
+  );
+
+  it.effect("resolves the registry and observations from the T3 home in use", () =>
+    Effect.gen(function* () {
+      const previous = process.env.NOFUN_MUSE_ACCOUNTS;
+      delete process.env.NOFUN_MUSE_ACCOUNTS;
+      try {
+        const m1Home = "/m1/.nofun-t3-m1/t/aaa";
+        const files = new Map<string, string>();
+        const calls: Array<FsCall> = [];
+        files.set(`${m1Home}/muse-accounts.json`, accountsJson);
+        const configured = decodeAccountsJson(accountsJson).accounts[0]!;
+        files.set(
+          `${m1Home}/muse-usage-observations/personal.900000.00000000-0000-4000-8000-000000000000.json`,
+          encodeJson({
+            version: 1,
+            accountId: "personal",
+            sourceId: "muse:personal",
+            accountBinding: museAccountBinding(configured),
+            signedInAs: "you@example.com",
+            cost: "passive",
+            recordedAtMs: 950_000,
+            usage: observation(900_000),
+          }),
+        );
+        yield* TestClock.setTime(1_000_000);
+        yield* withService(
+          files,
+          calls,
+          (service) =>
+            Effect.gen(function* () {
+              const current = yield* service.current;
+              expect(current.map((s) => s.id)).toEqual(["muse:personal"]);
+              expect(current[0]?.accounts).toHaveLength(1);
+              expect(current[0]?.accounts[0]?.usageLimits.windows).toMatchObject([
+                { usedPercent: 40 },
+                { usedPercent: 10 },
+              ]);
+              expect(calls.some((call) => call.path === `${m1Home}/muse-accounts.json`)).toBe(true);
+            }),
+          undefined,
+          m1Home,
+        );
+      } finally {
+        if (previous === undefined) delete process.env.NOFUN_MUSE_ACCOUNTS;
+        else process.env.NOFUN_MUSE_ACCOUNTS = previous;
       }
     }),
   );

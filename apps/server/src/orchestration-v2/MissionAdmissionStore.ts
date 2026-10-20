@@ -82,6 +82,7 @@ export interface MissionAdmissionTrustedFacts {
   readonly route: MissionAdmissionFacts["route"];
   readonly usageLimits: MissionAdmissionFacts["usageLimits"];
   readonly usageMaxObservationAgeMs: number;
+  readonly usageSource?: MissionAdmissionFacts["usageSource"];
   readonly maxFactAgeMs?: number | undefined;
   readonly unknownUsageException?: MissionAdmissionFacts["unknownUsageException"];
   readonly host: MissionAdmissionFacts["host"];
@@ -619,6 +620,7 @@ const make = Effect.gen(function* () {
       trusted = {
         ...trusted,
         usageLimits: observations.get(trusted.route.providerInstanceId)?.limits,
+        usageSource: observations.get(trusted.route.providerInstanceId)?.source,
         host: withExecutionCapacity(trusted.host, capacity),
       };
     }

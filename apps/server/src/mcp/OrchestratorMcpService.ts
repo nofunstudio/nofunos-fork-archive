@@ -1896,7 +1896,10 @@ const make = Effect.gen(function* () {
                   id: model.slug,
                   label: model.name ?? null,
                   usage: {
-                    ...usageHeadroomObservation(usageLimits, nowMs, { model: model.slug }),
+                    ...usageHeadroomObservation(usageLimits, nowMs, {
+                      model: model.slug,
+                      trustUnresetWindow: observation?.source === "muse",
+                    }),
                     source: observation?.source ?? "unavailable",
                   },
                   ...(model.capabilities?.optionDescriptors === undefined
@@ -1907,7 +1910,9 @@ const make = Effect.gen(function* () {
               canRunCrossProviderChildTask: constraints.length === 0,
               constraints: [...constraints],
               usage: {
-                ...usageHeadroomObservation(usageLimits, nowMs),
+                ...usageHeadroomObservation(usageLimits, nowMs, {
+                  trustUnresetWindow: observation?.source === "muse",
+                }),
                 source: observation?.source ?? "unavailable",
               },
             };
