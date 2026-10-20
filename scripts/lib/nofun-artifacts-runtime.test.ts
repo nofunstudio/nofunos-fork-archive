@@ -110,15 +110,21 @@ describe("prebuildNofunArtifactsRuntime staged tool-bundle runtime", () => {
         NodePath.join(packageDir, "node_modules"),
         NodePath.join(fakePkg, "node_modules"),
       );
+      // A stale local rebuild of the pin version must NOT win: when the pin is a
+      // mission version the canonical source is the only staging source, so the
+      // stale bytes planted here stay unused even though the local dist exists.
       const fixtureDir = NodePath.join(fakePkg, "dist", "nofun-ui-runtime", version);
       NodeFS.mkdirSync(NodePath.join(fixtureDir, "brands"), { recursive: true });
-      NodeFS.writeFileSync(NodePath.join(fixtureDir, "runtime.js"), "window.NoFunUI={};\n");
-      NodeFS.writeFileSync(NodePath.join(fixtureDir, "runtime.css"), "body{}\n");
+      NodeFS.writeFileSync(
+        NodePath.join(fixtureDir, "runtime.js"),
+        "window.NoFunUI={stale:true};\n",
+      );
+      NodeFS.writeFileSync(NodePath.join(fixtureDir, "runtime.css"), "body{stale:true}\n");
       NodeFS.writeFileSync(
         NodePath.join(fixtureDir, "manifest.json"),
         `${JSON.stringify({ version, sha256: "0".repeat(64), modules: [] })}\n`,
       );
-      NodeFS.writeFileSync(NodePath.join(fixtureDir, "brands", "t3.css"), "body{}\n");
+      NodeFS.writeFileSync(NodePath.join(fixtureDir, "brands", "t3.css"), "body{stale:true}\n");
       // Mission runtimes come from the canonical source, never the local dist build.
       const missionRoot = NodePath.join(scratch, "mission");
       const missionPins = MISSION_RUNTIME_VERSIONS.map((staged) => {
@@ -133,6 +139,27 @@ describe("prebuildNofunArtifactsRuntime staged tool-bundle runtime", () => {
         missionRuntimes: missionPins,
         missionRuntimeRoot: missionRoot,
       });
+      // When the pin collides with a mission version, the staged bytes equal the
+      // canonical fixture and the stale local-build bytes are not used.
+      if (missionPins.some((pin) => pin.version === version)) {
+        for (const name of ["runtime.js", "runtime.css", "manifest.json", "brands/t3.css"]) {
+          const staged = NodeFS.readFileSync(
+            NodePath.join(outDir, "dist", "nofun-ui-runtime", version, name),
+          );
+          const canonical = NodeFS.readFileSync(NodePath.join(missionRoot, version, name));
+          assert.isTrue(
+            staged.equals(canonical),
+            `staged ${version}/${name} must equal the canonical source bytes`,
+          );
+        }
+        assert.notInclude(
+          NodeFS.readFileSync(
+            NodePath.join(outDir, "dist", "nofun-ui-runtime", version, "runtime.js"),
+            "utf8",
+          ),
+          "stale",
+        );
+      }
       for (const name of ["runtime.js", "runtime.css", "manifest.json"]) {
         assert.isTrue(
           NodeFS.statSync(NodePath.join(outDir, "dist", "nofun-ui-runtime", version, name), {
@@ -223,19 +250,24 @@ describe("prebuildNofunArtifactsRuntime staged tool-bundle runtime", () => {
         NodePath.join(packageDir, "node_modules"),
         NodePath.join(fakePkg, "node_modules"),
       );
+      // A stale local rebuild of the pin version must NOT win: when the pin is a
+      // mission version the canonical source is the only staging source, so this
+      // stale pin fixture stays unused. The loop below skips replanting the pin
+      // version because this directory already holds its stale bytes.
       const pinFixtureDir = NodePath.join(fakePkg, "dist", "nofun-ui-runtime", versions[0]!);
       NodeFS.mkdirSync(NodePath.join(pinFixtureDir, "brands"), { recursive: true });
-      NodeFS.writeFileSync(NodePath.join(pinFixtureDir, "runtime.js"), "window.NoFunUI={};\n");
-      NodeFS.writeFileSync(NodePath.join(pinFixtureDir, "runtime.css"), "body{}\n");
+      NodeFS.writeFileSync(
+        NodePath.join(pinFixtureDir, "runtime.js"),
+        "window.NoFunUI={stale:true};\n",
+      );
+      NodeFS.writeFileSync(NodePath.join(pinFixtureDir, "runtime.css"), "body{stale:true}\n");
       NodeFS.writeFileSync(
         NodePath.join(pinFixtureDir, "manifest.json"),
         `${JSON.stringify({ version: versions[0], sha256: "0".repeat(64), modules: [] })}\n`,
       );
-      NodeFS.writeFileSync(NodePath.join(pinFixtureDir, "brands", "t3.css"), "body{}\n");
+      NodeFS.writeFileSync(NodePath.join(pinFixtureDir, "brands", "t3.css"), "body{stale:true}\n");
       // A dist copy of a mission version must NOT satisfy staging: only the canonical
-      // source counts, so the stale local rebuild planted here stays unused. Versions equal
-      // to the pin are skipped: the pin fixture above IS their staging source, and the
-      // staging loop validates those bytes against the mission digest instead.
+      // source counts, so the stale local rebuild planted here stays unused.
       for (const version of MISSION_RUNTIME_VERSIONS) {
         if (version === pin.slice(0, 12)) continue;
         const stale = NodePath.join(fakePkg, "dist", "nofun-ui-runtime", version);
@@ -324,6 +356,63 @@ describe("prebuildNofunArtifactsRuntime staged tool-bundle runtime", () => {
         if (value === undefined) delete process.env[key];
         else process.env[key] = value;
       }
+      NodeFS.rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+
+  it("stages the canonical mission copy when the pin version has no local dist", async () => {
+    const packageDir = NodePath.join(repoRoot, "packages/nofun-artifacts");
+    const scratch = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "nofun-runtime-test-"));
+    try {
+      const fakePkg = NodePath.join(scratch, "repo", "packages", "nofun-artifacts");
+      NodeFS.mkdirSync(fakePkg, { recursive: true });
+      for (const name of ["package.json", "components.pin"]) {
+        NodeFS.copyFileSync(NodePath.join(packageDir, name), NodePath.join(fakePkg, name));
+      }
+      for (const name of ["src", "fonts", "generated"]) {
+        NodeFS.cpSync(NodePath.join(packageDir, name), NodePath.join(fakePkg, name), {
+          recursive: true,
+        });
+      }
+      NodeFS.symlinkSync(
+        NodePath.join(packageDir, "node_modules"),
+        NodePath.join(fakePkg, "node_modules"),
+      );
+      // No dist/ fixture at all: when the pin version is a mission version, staging
+      // must succeed from the canonical source alone without a local runtime:build.
+      const pin = NodeFS.readFileSync(NodePath.join(packageDir, "components.pin"), "utf8")
+        .trim()
+        .split(/\s+/)[0]!
+        .toLowerCase()
+        .slice(0, 12);
+      const missionRoot = NodePath.join(scratch, "mission");
+      const sourceDir = writeMissionFixture(
+        missionRoot,
+        pin,
+        "window.NoFunUI={canonical:true};\n",
+        "body{color:green}\n",
+      );
+      const expected = missionRuntimeDigest(sourceDir);
+      const outDir = NodePath.join(scratch, "staged");
+      await prebuildNofunArtifactsRuntime({
+        repoRoot: NodePath.join(scratch, "repo"),
+        outDir,
+        missionRuntimes: [{ version: pin, sha256: expected }],
+        missionRuntimeRoot: missionRoot,
+      });
+      for (const name of ["runtime.js", "runtime.css", "manifest.json", "brands/t3.css"]) {
+        assert.isTrue(
+          NodeFS.readFileSync(NodePath.join(outDir, "dist", "nofun-ui-runtime", pin, name)).equals(
+            NodeFS.readFileSync(NodePath.join(sourceDir, name)),
+          ),
+          `staged ${pin}/${name} must equal the validated source bytes`,
+        );
+      }
+      assert.equal(
+        missionRuntimeDigest(NodePath.join(outDir, "dist", "nofun-ui-runtime", pin)),
+        expected,
+      );
+    } finally {
       NodeFS.rmSync(scratch, { recursive: true, force: true });
     }
   });

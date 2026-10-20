@@ -172,9 +172,11 @@ export async function prebuildNofunArtifactsRuntime(input: {
     NodePath.join(input.outDir, "components.pin"),
   );
   // emitToolBundle defaults to the pinned UI runtime and the packaged server never sets
-  // runtimeRoot, so stage it with the same relative layout the source package uses. The mission
-  // pin (emitToolBundle({ runtimeVersion: '580e64f46a50' })) must resolve the same way, so every
-  // version below has to be present before anything is copied: fail early, not mid-package.
+  // runtimeRoot, so stage it with the same relative layout the source package uses. Mission
+  // sources resolve and validate first: when the components pin IS a mission version, that
+  // canonical directory is the only staging source for the version (no local dist required,
+  // never a local rebuild). A local runtime:build remains required only for a pin version
+  // that is not a mission version. Fail early, not mid-package.
   const runtimeSrcDir = NodePath.join(packageDir, "dist", "nofun-ui-runtime");
   const pinHead =
     NodeFs.readFileSync(NodePath.join(packageDir, "components.pin"), "utf8")
@@ -183,22 +185,6 @@ export async function prebuildNofunArtifactsRuntime(input: {
       ?.toLowerCase() ?? "";
   const pinVersion = pinHead.slice(0, 12);
   const pinDir = NodePath.join(runtimeSrcDir, pinVersion);
-  const pinStats = NodeFs.lstatSync(pinDir, { throwIfNoEntry: false });
-  const pinHasFiles =
-    pinStats?.isDirectory() === true &&
-    NodeFs.lstatSync(NodePath.join(pinDir, "runtime.js"), {
-      throwIfNoEntry: false,
-    })?.isFile() === true &&
-    NodeFs.lstatSync(NodePath.join(pinDir, "runtime.css"), {
-      throwIfNoEntry: false,
-    })?.isFile() === true;
-  if (!pinHead || !pinHasFiles) {
-    throw new Error(
-      `no built runtime at ${pinDir} for version ${pinVersion}; run \`pnpm runtime:build\` ` +
-        `in packages/nofun-artifacts with NOFUN_COMPONENTS_DIR at a clean ${pinVersion} checkout ` +
-        `(NOFUN_COMPONENTS_ALLOW_DIRTY=1 when its HEAD is not components.pin) first.`,
-    );
-  }
   // Mission runtimes are never staged from a local runtime:build: their bytes must equal the
   // canonical pair both pinned hosts admit, so copy them from the canonical source and fail
   // closed when the digest disagrees.
@@ -233,18 +219,35 @@ export async function prebuildNofunArtifactsRuntime(input: {
   }
   const stagedRuntimeDir = NodePath.join(input.outDir, "dist", "nofun-ui-runtime");
   NodeFs.mkdirSync(stagedRuntimeDir, { recursive: true });
-  NodeFs.cpSync(pinDir, NodePath.join(stagedRuntimeDir, pinVersion), { recursive: true });
+  const canonicalPinSource = pinVersion ? missionSources.get(pinVersion) : undefined;
+  if (canonicalPinSource !== undefined) {
+    // Collision: the components pin is a mission version. Stage ONLY the validated
+    // canonical directory, whole (runtime.js/css plus manifest and brand files). A
+    // locally built dist copy of this version is never required and never read.
+    NodeFs.cpSync(canonicalPinSource, NodePath.join(stagedRuntimeDir, pinVersion), {
+      recursive: true,
+    });
+  } else {
+    const pinStats = NodeFs.lstatSync(pinDir, { throwIfNoEntry: false });
+    const pinHasFiles =
+      pinStats?.isDirectory() === true &&
+      NodeFs.lstatSync(NodePath.join(pinDir, "runtime.js"), {
+        throwIfNoEntry: false,
+      })?.isFile() === true &&
+      NodeFs.lstatSync(NodePath.join(pinDir, "runtime.css"), {
+        throwIfNoEntry: false,
+      })?.isFile() === true;
+    if (!pinHead || !pinHasFiles) {
+      throw new Error(
+        `no built runtime at ${pinDir} for version ${pinVersion}; run \`pnpm runtime:build\` ` +
+          `in packages/nofun-artifacts with NOFUN_COMPONENTS_DIR at a clean ${pinVersion} checkout ` +
+          `(NOFUN_COMPONENTS_ALLOW_DIRTY=1 when its HEAD is not components.pin) first.`,
+      );
+    }
+    NodeFs.cpSync(pinDir, NodePath.join(stagedRuntimeDir, pinVersion), { recursive: true });
+  }
   for (const [version, sourceDir] of missionSources) {
     if (version === pinVersion) {
-      // The staged bytes come from the local build here, so they still face the pin.
-      const staged = missionRuntimeDigest(NodePath.join(stagedRuntimeDir, pinVersion));
-      const expected = missionRuntimes.find((pin) => pin.version === version)?.sha256;
-      if (staged !== expected) {
-        throw new Error(
-          `mission runtime ${version} built locally has sha256 ${staged}, expected ` +
-            `${expected}; refusing to stage non-canonical bytes the pinned hosts reject.`,
-        );
-      }
       continue;
     }
     NodeFs.cpSync(sourceDir, NodePath.join(stagedRuntimeDir, version), { recursive: true });
