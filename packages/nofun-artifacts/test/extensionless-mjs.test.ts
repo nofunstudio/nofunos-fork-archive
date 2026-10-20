@@ -191,6 +191,69 @@ test("symlinked .mjs-only target resolves through the fallback", async () => {
   }
 });
 
+test("package.json browser:false mapping still disables the module", async () => {
+  const { dir, index } = scratchDir();
+  try {
+    NodeFs.writeFileSync(
+      NodePath.join(dir, "package.json"),
+      `${JSON.stringify({ browser: { "./foo.ts": false } })}\n`,
+    );
+    NodeFs.writeFileSync(NodePath.join(dir, "foo.ts"), `export default "SHOULD-BE-DISABLED";\n`);
+    NodeFs.writeFileSync(
+      NodePath.join(dir, "entry.ts"),
+      `import x from "./foo";\n(globalThis as any).__rv = x;\n`,
+    );
+    // esbuild natively resolves ./foo to foo.ts and then applies the
+    // browser:false mapping, emitting an empty disabled module. Returning a
+    // probed path instead would lose that disabled-module state and fail.
+    const built = await bundleEntry(dir, index, "entry.ts");
+    assert.doesNotMatch(built.js, /SHOULD-BE-DISABLED/);
+  } finally {
+    NodeFs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("50 extensionless imports stay close to explicit-extension time", async () => {
+  const { dir, index } = scratchDir();
+  try {
+    const count = 50;
+    for (let i = 0; i < count; i++) {
+      NodeFs.writeFileSync(NodePath.join(dir, `f${i}.ts`), `export const n${i} = ${i};\n`);
+    }
+    const names = Array.from({ length: count }, (_, i) => `n${i}`);
+    NodeFs.writeFileSync(
+      NodePath.join(dir, "entry.ts"),
+      `${names.map((n, i) => `import { ${n} } from "./f${i}";`).join("\n")}\n(globalThis as any).__rv = ${names.join(" + ")};\n`,
+    );
+    NodeFs.writeFileSync(
+      NodePath.join(dir, "entry-explicit.ts"),
+      `${names.map((n, i) => `import { ${n} } from "./f${i}.ts";`).join("\n")}\n(globalThis as any).__rv = ${names.join(" + ")};\n`,
+    );
+    // Warm up the esbuild service so startup cost does not skew either side.
+    await bundleEntry(dir, index, "entry-explicit.ts");
+    async function medianMs(name: string): Promise<number> {
+      const samples: number[] = [];
+      for (let i = 0; i < 3; i++) {
+        const start = performance.now();
+        await bundleEntry(dir, index, name);
+        samples.push(performance.now() - start);
+      }
+      samples.sort((a, b) => a - b);
+      return samples[1]!;
+    }
+    const explicit = await medianMs("entry-explicit.ts");
+    const extensionless = await medianMs("entry.ts");
+    // An extra build.resolve round trip per import made this ~19x slower
+    // (about 1.2 s vs 62-78 ms); the sync stat fallback must stay near par.
+    assert.ok(
+      extensionless <= explicit * 4,
+      `extensionless imports took ${extensionless.toFixed(1)} ms vs ${explicit.toFixed(1)} ms explicit`,
+    );
+  } finally {
+    NodeFs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("extensionless relative import still prefers the builder's existing targets", async () => {
   const { dir, index } = fixtureDir();
   try {
