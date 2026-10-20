@@ -273,7 +273,7 @@ describe("MissionAdmission", () => {
         kind: "weekly",
         label: "weekly",
         usedPercent: 10,
-        resetsAt: iso(NOW_MS + 6 * 24 * 60_000),
+        resetsAt: iso(NOW_MS + 6 * 24 * 60 * 60_000),
       },
     ],
   });
@@ -303,6 +303,36 @@ describe("MissionAdmission", () => {
         usageLimits: museStaleFixture(100, NOW_MS - 30 * 60_000, NOW_MS - 120 * 60_000),
       }),
       "usage_exhausted",
+    );
+  });
+
+  it("refuses a 378-day-old healthy Muse observation as unknown", () => {
+    const ancient: ServerProviderUsageLimits = {
+      checkedAt: iso(NOW_MS - 378 * 24 * 60 * 60_000),
+      windows: [
+        {
+          id: "five_hour",
+          kind: "session",
+          label: "5h",
+          usedPercent: 40,
+          resetsAt: iso(NOW_MS - 377 * 24 * 60 * 60_000),
+        },
+        {
+          id: "weekly",
+          kind: "weekly",
+          label: "weekly",
+          usedPercent: 10,
+          resetsAt: iso(NOW_MS - 371 * 24 * 60 * 60_000),
+        },
+      ],
+    };
+    assert.strictEqual(
+      codeOf(requestFixture(), {
+        ...factsFixture(),
+        usageSource: "muse",
+        usageLimits: ancient,
+      }),
+      "usage_unknown",
     );
   });
 

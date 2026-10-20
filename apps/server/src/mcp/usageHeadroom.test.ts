@@ -215,6 +215,44 @@ describe("usageHeadroom", () => {
     expect(result.summary).toContain("likely fresh");
   });
 
+  it("expires the all-reset passive grace one weekly period past the observation", () => {
+    const allResetAgo = (checkedAgoMinutes: number) => ({
+      checkedAt: at(-checkedAgoMinutes),
+      windows: [window("session", 40, -60), window("weekly", 10, -30)],
+    });
+    const GRACE_MINUTES = 7 * 24 * 60;
+    const inside = usageHeadroom(allResetAgo(GRACE_MINUTES), NOW, {
+      trustUnresetWindow: true,
+    });
+    expect(inside.headroom).toBe("ok");
+    expect(inside.summary).toContain("likely fresh");
+    const outside = usageHeadroom(allResetAgo(GRACE_MINUTES + 1), NOW, {
+      trustUnresetWindow: true,
+    });
+    expect(outside.headroom).toBe("unknown");
+  });
+
+  it("reads a multi-week-old healthy passive observation as unknown", () => {
+    const result = usageHeadroom(
+      {
+        checkedAt: at(-21 * 24 * 60),
+        windows: [window("session", 40, -30), window("weekly", 10, -60)],
+      },
+      NOW,
+      { trustUnresetWindow: true },
+    );
+    expect(result.headroom).toBe("unknown");
+  });
+
+  it("keeps observed low and exhausted sticky past the passive grace", () => {
+    const aged = (usedPercent: number) => ({
+      checkedAt: at(-21 * 24 * 60),
+      windows: [window("session", usedPercent, -30), window("weekly", 10, -60)],
+    });
+    expect(usageHeadroom(aged(90), NOW, { trustUnresetWindow: true }).headroom).toBe("low");
+    expect(usageHeadroom(aged(100), NOW, { trustUnresetWindow: true }).headroom).toBe("exhausted");
+  });
+
   it("still reports low and exhausted from a stale passive observation", () => {
     const staleLow = {
       checkedAt: at(-45),
