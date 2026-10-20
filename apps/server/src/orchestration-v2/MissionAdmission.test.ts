@@ -12,6 +12,7 @@ import {
   type MissionAdmissionFacts,
   type MissionAdmissionRequest,
 } from "./MissionAdmission.ts";
+import { serverBuildFactsForAdmission } from "./ServerBuildIdentity.ts";
 
 const NOW_MS = Date.parse("2026-10-14T03:00:00.000Z");
 const iso = (ms: number): string => DateTime.formatIso(DateTime.makeUnsafe(ms));
@@ -616,7 +617,7 @@ describe("MissionAdmission", () => {
     );
   });
 
-  describe("server build identity (J01 gate 3)", () => {
+  describe("server build identity (admission decision)", () => {
     const RUNNING_SHA = "a2ee2aab36da0982634aa5781b9a66dd18a0bc5d";
     const REQUIRED_SHA = "b2ee2aab36da0982634aa5781b9a66dd18a0bc5e";
     const withBuild = (
@@ -707,6 +708,75 @@ describe("MissionAdmission", () => {
       if (Result.isFailure(replay)) {
         assert.strictEqual(replay.failure.code, "build_mismatch");
       }
+    });
+
+    it("admits an explicitly unpinned mission via the BK1b seam (requiredServerBuild null)", () => {
+      const running = { sha: RUNNING_SHA, version: "0.0.44" };
+      const facts = {
+        ...factsFixture(),
+        requiredServerBuild: null,
+        serverBuild: serverBuildFactsForAdmission(null, running),
+      } as const;
+      const { dispatchAuthorized } = successOf(requestFixture(), { ...facts });
+      assert.isTrue(dispatchAuthorized);
+    });
+
+    it("refuses a pin-required mission with the pin absent via the BK1b seam", () => {
+      const running = { sha: RUNNING_SHA, version: "0.0.44" };
+      const facts = {
+        ...factsFixture(),
+        serverBuild: serverBuildFactsForAdmission(undefined, running),
+      };
+      assert.strictEqual(codeOf(requestFixture(), facts), "build_mismatch");
+    });
+
+    it("refuses a present pin without a running attestation as missing facts", () => {
+      const facts = {
+        ...factsFixture(),
+        requiredServerBuild: { sha: REQUIRED_SHA, version: "0.0.45" },
+      };
+      const result = decideMissionAdmission(requestFixture(), facts);
+      assert.isTrue(Result.isFailure(result));
+      if (Result.isFailure(result)) {
+        assert.strictEqual(result.failure.code, "build_mismatch");
+        assert.include(result.failure.message, "no running build attestation");
+      }
+    });
+
+    it("enforces an exact SHA match for a present pin via the BK1b seam", () => {
+      const pin = { sha: REQUIRED_SHA, version: "0.0.45" };
+      const matching = successOf(requestFixture(), {
+        ...factsFixture(),
+        requiredServerBuild: pin,
+        serverBuild: serverBuildFactsForAdmission(pin, { ...pin }),
+      });
+      assert.isTrue(matching.dispatchAuthorized);
+      const mismatched = {
+        ...factsFixture(),
+        requiredServerBuild: pin,
+        serverBuild: serverBuildFactsForAdmission(pin, {
+          sha: RUNNING_SHA,
+          version: "0.0.44",
+        }),
+      };
+      assert.strictEqual(codeOf(requestFixture(), mismatched), "build_mismatch");
+    });
+
+    it("build refusal leaves no admission or child state change", () => {
+      // decideMissionAdmission is pure: it returns a receipt or a rejection
+      // and writes nothing. A refusal must carry no receipt, authorize no
+      // dispatch, and leave the supplied facts (prior receipts) untouched.
+      const facts = withBuild(
+        { sha: RUNNING_SHA, version: "0.0.44" },
+        { sha: REQUIRED_SHA, version: "0.0.45" },
+      );
+      const before = facts.priorReceipts.length;
+      const result = decideMissionAdmission(requestFixture(), facts);
+      assert.isTrue(Result.isFailure(result));
+      if (Result.isFailure(result)) {
+        assert.strictEqual(result.failure.code, "build_mismatch");
+      }
+      assert.strictEqual(facts.priorReceipts.length, before);
     });
   });
 });

@@ -195,6 +195,17 @@ export interface MissionAdmissionFacts {
   /** Derived from canonical task/result state, never the dispatch proposal. */
   readonly taskNecessary: boolean;
   readonly serverBuild?: MissionAdmissionServerBuildFacts | undefined;
+  /**
+   * BK1b seam: trusted required-build pin sourced from the canonical mission.
+   * `null` means the mission explicitly pins no build (legacy/unpinned).
+   * A present pin means the mission requires that exact build. Absent
+   * (`undefined`) means the facts predate pin support (legacy snapshots).
+   * BK1b populates this alongside `serverBuild` via
+   * `serverBuildFactsForAdmission()`; the decision uses `serverBuild` when
+   * present and treats a present pin without a running attestation as
+   * missing facts (refuse), never a silent pass.
+   */
+  readonly requiredServerBuild?: ServerBuild | null | undefined;
   readonly nowMs: number;
   readonly teamId: string;
   readonly environmentId: string;
@@ -374,8 +385,23 @@ const checkServerBuild = (
   missionId: string,
   dispatchKey: string,
   build: MissionAdmissionServerBuildFacts | undefined,
+  requiredServerBuild: ServerBuild | null | undefined,
 ): MissionAdmissionResult | null => {
-  if (build === undefined || build.required === null) return null;
+  if (build === undefined) {
+    // BK1b seam: an explicitly unpinned mission (`null`) or legacy facts
+    // that predate pin support (absent) carry no gate. A present trusted pin
+    // without a running build attestation is missing facts: refuse, never
+    // a silent pass. BK1b always pairs a pin with a running build via
+    // `serverBuildFactsForAdmission()`, so this path only fires when the
+    // facts layer failed to attest the running build.
+    if (requiredServerBuild === undefined || requiredServerBuild === null) return null;
+    return err(
+      "build_mismatch",
+      `Mission '${missionId}' requires a pinned server build but the facts carry no running build attestation; re-read the trusted facts first.`,
+      dispatchKey,
+    );
+  }
+  if (build.required === null) return null;
   if (build.required.sha === null || build.required.sha.trim().length === 0) {
     return err(
       "build_mismatch",
@@ -596,11 +622,20 @@ export const decideMissionAdmission = (
     workspaceRoot: request.workspaceRoot,
   });
 
-  // J01 gate 3: the mission pins the exact server build it requires. An
-  // old, different, or unknown binary refuses here, before same-key recovery,
-  // so a stale server can neither admit nor recover a dispatch. Same-build
-  // replay still recovers below (BK1 idempotency is preserved).
-  const buildGate = checkServerBuild(mission.id, dispatchKey, facts.serverBuild);
+  // J01 gate 3 (partial: BK1b must wire the trusted facts path before this
+  // fires in production): when the mission pins a build, the running server
+  // must be that exact SHA — version only diagnoses "older" vs "not equal".
+  // The check sits before same-key recovery on purpose: an old, different,
+  // or unknown binary can neither admit nor recover a dispatch, so a stale
+  // server cannot replay its way back in. Consequence: a legitimate upgrade
+  // also blocks exact replay until the mission pin is migrated to the new
+  // SHA; migrate the pin, then replay recovers on the same build as before.
+  const buildGate = checkServerBuild(
+    mission.id,
+    dispatchKey,
+    facts.serverBuild,
+    facts.requiredServerBuild,
+  );
   if (buildGate !== null) return buildGate;
 
   // Same-key recovery: retrieval only, after all scope/auth/hash checks above.

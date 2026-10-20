@@ -5,6 +5,7 @@ import {
   compareBuildVersions,
   isSameBuild,
   readServerBuild,
+  serverBuildFactsForAdmission,
   type ServerBuild,
 } from "./ServerBuildIdentity.ts";
 
@@ -101,5 +102,31 @@ describe("assessBuildCurrency", () => {
       assessBuildCurrency({ sha: SHA_B, version: "0.0.46" }, { sha: SHA_A, version: "0.0.45" }),
       { ok: false, reason: "not-equal" },
     );
+  });
+});
+
+describe("serverBuildFactsForAdmission", () => {
+  const running: ServerBuild = { sha: SHA_A, version: "0.0.45" };
+  const pin: ServerBuild = { sha: SHA_B, version: "0.0.45" };
+
+  it("passes an explicitly unpinned mission through as required null", () => {
+    assert.deepEqual(serverBuildFactsForAdmission(null, running), {
+      running,
+      required: null,
+    });
+  });
+
+  it("maps a missing pin to a null-SHA requirement the gate refuses", () => {
+    assert.deepEqual(serverBuildFactsForAdmission(undefined, running), {
+      running,
+      required: { sha: null, version: null },
+    });
+  });
+
+  it("pairs a present pin with the running build for exact matching", () => {
+    assert.deepEqual(serverBuildFactsForAdmission(pin, running), {
+      running,
+      required: pin,
+    });
   });
 });

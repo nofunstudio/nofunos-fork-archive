@@ -88,6 +88,31 @@ export type BuildCurrency =
   | { readonly ok: false; readonly reason: "unknown-running" | "older" | "not-equal" };
 
 /**
+ * BK1b binding seam: build the `serverBuild` admission-facts value from the
+ * trusted mission pin and the running server build. BK1b calls this in the
+ * trusted facts path as
+ * `serverBuildFactsForAdmission(requiredServerBuild, resolveServerBuild())`,
+ * where `requiredServerBuild` is the canonical mission's pin.
+ *
+ * - `null` means the mission explicitly pins no build (legacy/unpinned), so
+ *   the returned pair carries `required: null` and the admission gate passes.
+ * - `undefined` means the mission is marked pin-required but the pin is
+ *   absent (missing facts). The returned pair carries a null-SHA requirement,
+ *   which the admission gate refuses — never a silent pass.
+ * - A present pin returns `{ running, required }`, and the admission gate
+ *   enforces an exact SHA match.
+ */
+export const serverBuildFactsForAdmission = (
+  requiredServerBuild: ServerBuild | null | undefined,
+  running: ServerBuild,
+): { readonly running: ServerBuild; readonly required: ServerBuild | null } => {
+  if (requiredServerBuild === undefined) {
+    return { running, required: { sha: null, version: null } };
+  }
+  return { running, required: requiredServerBuild };
+};
+
+/**
  * Assess the running build against the build the mission requires.
  * A `null` requirement means the mission pins no build: pass (legacy).
  * Otherwise refuse an unknown running build or a SHA mismatch; report
